@@ -84,7 +84,7 @@ class KVCacheManager:
                       self.num_gpu_blocks)
 
     def get_computed_blocks(
-            self, request: Request) -> Tuple[List[KVCacheBlock], int]:
+            self, request: Request) -> Tuple[List[KVCacheBlock], int]: # 获取计算的块
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
@@ -124,7 +124,7 @@ class KVCacheManager:
         num_computed_tokens = len(computed_blocks) * self.block_size
         return computed_blocks, num_computed_tokens
 
-    def allocate_slots(
+    def allocate_slots( # 为请求分配slots
         self,
         request: Request,
         num_tokens: int,
@@ -235,7 +235,7 @@ class KVCacheManager:
 
         return new_blocks
 
-    def free(self, request: Request) -> None:
+    def free(self, request: Request) -> None: # 释放块
         """Free the blocks allocated for the request.
         When caching is enabled, we free the blocks in reverse order so that
         the tail blocks are evicted first.
@@ -256,7 +256,7 @@ class KVCacheManager:
             if block.ref_cnt == 0:
                 self.free_block_queue.append(block)
 
-    def reset_prefix_cache(self) -> bool:
+    def reset_prefix_cache(self) -> bool: # 重置前缀缓存
         """Reset prefix cache. This function may be used in RLHF
         flows to invalid prefix caching after the weights are updated,
         or used for resetting prefix caching status for benchmarking.
@@ -283,7 +283,7 @@ class KVCacheManager:
         logger.info("Successfully reset prefix cache")
         return True
 
-    def get_num_common_prefix_blocks(
+    def get_num_common_prefix_blocks( # 获取公共前缀块的数量
         self,
         request: Request,
         num_running_requests: int,
@@ -331,7 +331,7 @@ class KVCacheManager:
                 break
         return num_common_blocks
 
-    def _get_new_blocks(self, num_blocks: int) -> List[KVCacheBlock]:
+    def _get_new_blocks(self, num_blocks: int) -> List[KVCacheBlock]: # 获取新块
         """Get new blocks from the free block pool.
 
         Note that we do not check block cache in this function.
@@ -363,7 +363,7 @@ class KVCacheManager:
 
         return ret
 
-    def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
+    def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool: # 尝试从缓存中移除块
         """
         If a block is cached in `cached_block_hash_to_block`, we reset its hash
         metadata and evict it from the cache.
@@ -386,7 +386,7 @@ class KVCacheManager:
         return False
 
     def _get_cached_block(self,
-                          block_hash: BlockHashType) -> Optional[KVCacheBlock]:
+                          block_hash: BlockHashType) -> Optional[KVCacheBlock]: # 从缓存中获取块
         """Get a cached block by the block hash, or None if cache miss.
         If there are duplicated blocks, we return the first block in the cache.
 
@@ -402,7 +402,7 @@ class KVCacheManager:
             return self.cached_block_hash_to_block[block_hash][first_block_id]
         return None
 
-    def _touch(self, blocks: List[KVCacheBlock]) -> None:
+    def _touch(self, blocks: List[KVCacheBlock]) -> None: # 访问块
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
@@ -502,7 +502,7 @@ class KVCacheManager:
             self.cached_block_hash_to_block[block_hash][blk.block_id] = blk
             prev_block_hash_value = block_hash.hash_value
 
-    def free_block_hashes(self, request: Request) -> None:
+    def free_block_hashes(self, request: Request) -> None: # 释放块哈希
         """Discard the block hashes for the request.
 
         NOTE: Unlike `free`, this method should be called only when the request

@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+"""
+tensor序列化
+"""
 
 import pickle
 from typing import Any, Optional
@@ -9,7 +12,7 @@ from msgspec import msgpack
 CUSTOM_TYPE_TENSOR = 1
 CUSTOM_TYPE_PICKLE = 2
 
-
+# tensor序列化编码
 class MsgpackEncoder:
     """Encoder with custom torch tensor serialization."""
 
@@ -22,7 +25,7 @@ class MsgpackEncoder:
     def encode_into(self, obj: Any, buf: bytearray) -> None:
         self.encoder.encode_into(obj, buf)
 
-
+# tensor序列化解码
 class MsgpackDecoder:
     """Decoder with custom torch tensor serialization."""
 

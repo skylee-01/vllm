@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-
+"""
+推理过程中，输出相关数据类。
+"""
 from dataclasses import dataclass
 from typing import Dict, List, NamedTuple, Optional
 

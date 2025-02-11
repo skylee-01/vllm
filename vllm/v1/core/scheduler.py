@@ -100,20 +100,28 @@ class Scheduler:
         # so that each request's num_computed_tokens can catch up its
         # num_tokens. This is general enough to cover chunked prefills,
         # prefix caching, and the "jump decoding" optimization in the future.
+        """
+        关于调度算法的说明（作者：woosuk）：调度器中不存在“解码阶段”或“预填充阶段”。
+        每个请求仅包含  num_computed_tokens  和  num_tokens  ，
+        其中  num_tokens  等于  len(prompt_token_ids) + len(output_token_ids)  。
+        在每一步中，调度器会尝试将令牌分配给各个请求，以便每个请求的  num_computed_tokens
+        能够赶上其  num_tokens  。这种方式足够通用，能够涵盖分块预填充、前缀缓存，
+        以及未来可能出现的“跳跃解码”优化。
+        """
 
-        scheduled_new_reqs: List[Request] = []
-        scheduled_resumed_reqs: List[Request] = []
-        scheduled_running_reqs: List[Request] = []
-        preempted_reqs: List[Request] = []
+        scheduled_new_reqs: List[Request] = [] # 新的请求
+        scheduled_resumed_reqs: List[Request] = [] # 恢复的请求
+        scheduled_running_reqs: List[Request] = [] # 正在运行的请求
+        preempted_reqs: List[Request] = [] # 被抢占的请求
 
-        req_to_new_block_ids: Dict[str, List[int]] = {}
-        num_scheduled_tokens: Dict[str, int] = {}
-        token_budget = self.max_num_scheduled_tokens
-        # Encoder-related.
-        scheduled_encoder_inputs: Dict[str, List[int]] = {}
-        encoder_budget = self.max_num_encoder_input_tokens
+        req_to_new_block_ids: Dict[str, List[int]] = {} # 请求到新块的映射
+        num_scheduled_tokens: Dict[str, int] = {} # 已调度的令牌数量
+        token_budget = self.max_num_scheduled_tokens # 调度预算
+        # Encoder-related. # 编码器相关
+        scheduled_encoder_inputs: Dict[str, List[int]] = {} # 已调度的输入
+        encoder_budget = self.max_num_encoder_input_tokens # 编码器预算
 
-        # First, schedule the RUNNING requests.
+        # First, schedule the RUNNING requests. 首先调度运行中的请求。
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
@@ -137,19 +145,19 @@ class Scheduler:
                 continue
 
             while True:
-                new_blocks = self.kv_cache_manager.allocate_slots(
+                new_blocks = self.kv_cache_manager.allocate_slots( # 分配新块
                     request, num_new_tokens)
-                if new_blocks is None:
+                if new_blocks is None: # 如果没有可用的块，则尝试抢占最不优先的请求
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
-                    preempted_req = self.running.pop()
-                    self.kv_cache_manager.free(preempted_req)
-                    preempted_req.status = RequestStatus.PREEMPTED
-                    preempted_req.num_computed_tokens = 0
+                    preempted_req = self.running.pop() # 获取最不优先的请求
+                    self.kv_cache_manager.free(preempted_req) # 释放块
+                    preempted_req.status = RequestStatus.PREEMPTED # 设置抢占状态
+                    preempted_req.num_computed_tokens = 0 # 设置已计算令牌数量为0
 
-                    self.waiting.appendleft(preempted_req)
-                    preempted_reqs.append(preempted_req)
-                    if preempted_req == request:
+                    self.waiting.appendleft(preempted_req) # 将抢占的请求加入等待队列
+                    preempted_reqs.append(preempted_req) # 将抢占的请求加入抢占队列
+                    if preempted_req == request: # 如果抢占的请求是当前请求，则跳出循环
                         # No more request to preempt.
                         can_schedule = False
                         break
@@ -157,29 +165,29 @@ class Scheduler:
                     # The request can be scheduled.
                     can_schedule = True
                     break
-            if not can_schedule:
+            if not can_schedule: # 如果不能调度，则跳出循环
                 break
             assert new_blocks is not None
 
             # Schedule the request.
-            scheduled_running_reqs.append(request)
-            req_to_new_block_ids[request.request_id] = [
+            scheduled_running_reqs.append(request) # 将请求加入正在运行的请求队列
+            req_to_new_block_ids[request.request_id] = [ # 将新块加入请求到新块的映射
                 b.block_id for b in new_blocks
             ]
-            num_scheduled_tokens[request.request_id] = num_new_tokens
-            token_budget -= num_new_tokens
+            num_scheduled_tokens[request.request_id] = num_new_tokens # 将调度的令牌数量加入调度的令牌数量映射
+            token_budget -= num_new_tokens # 更新调度预算
             req_index += 1
 
-            # Encoder-related.
-            if encoder_inputs_to_schedule:
-                scheduled_encoder_inputs[request.request_id] = (
+            # Encoder-related. # 编码器相关
+            if encoder_inputs_to_schedule : #
+                scheduled_encoder_inputs[request.request_id] = ( # 将编码器输入加入请求到新块的映射
                     encoder_inputs_to_schedule)
-                # Allocate the encoder cache.
-                for i in encoder_inputs_to_schedule:
+                # Allocate the encoder cache.  # 分配编码器缓存
+                for i in encoder_inputs_to_schedule: # 遍历编码器输入
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_budget = new_encoder_budget
 
-        # Record the LoRAs in scheduled_running_reqs
+        # Record the LoRAs in scheduled_running_reqs # 记录LoRAs
         requested_loras: Set[int] = set()
         if self.lora_config:
             requested_loras = set(
@@ -187,7 +195,7 @@ class Scheduler:
                 if req.lora_request and req.lora_request.lora_int_id > 0)
             assert len(requested_loras) <= self.lora_config.max_loras
 
-        # Next, schedule the WAITING requests.
+        # Next, schedule the WAITING requests. 接下来调度等待中的请求。
         if not preempted_reqs:
             while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
@@ -277,7 +285,7 @@ class Scheduler:
                         self.encoder_cache_manager.allocate(request, i)
                     encoder_budget = new_encoder_budget
 
-        # Check if the scheduling constraints are satisfied.
+        # Check if the scheduling constraints are satisfied. 检查调度约束是否满足。
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
@@ -297,7 +305,7 @@ class Scheduler:
                 self.kv_cache_manager.get_num_common_prefix_blocks(
                     any_request, len(self.running)))
 
-        # Construct the scheduler output.
+        # Construct the scheduler output. # 构建调度输出。
         new_reqs_data = [
             NewRequestData.from_request(req,
                                         req_to_new_block_ids[req.request_id],
@@ -382,6 +390,12 @@ class Scheduler:
         If an encoder input cannot be scheduled due to cache or budget
         limitations, the method adjusts `num_new_tokens` to schedule only the
         decoder tokens up to just before the unschedulable encoder input.
+        确定在当前步骤中需要调度的编码器输入，并相应地更新   num_new_tokens   和编码器令牌预算。
+        编码器输入将被调度，如果满足以下条件：
+        • 其输出令牌与当前步骤中正在计算的令牌范围重叠，即 [num_computed_tokens, num_computed_tokens + num_new_tokens)。
+        • 它尚未被计算并存储在编码器缓存中。
+        • 有足够的编码器令牌预算来处理它。
+        • 编码器缓存有足够的空间来存储它。如果由于缓存或预算限制而无法调度编码器输入，该方法将调整   num_new_tokens  ，以便仅调度解码器令牌，直到无法调度的编码器输入之前。
         """
         if not request.has_encoder_inputs():
             return [], num_new_tokens, encoder_budget
@@ -525,6 +539,7 @@ class Scheduler:
             scheduler_stats=self.make_stats(),
         )
 
+    # 检查是否停止。
     def _check_stop(self, request: Request) -> bool:
         if (request.num_tokens >= self.max_model_len
                 or request.num_output_tokens >= request.max_tokens):

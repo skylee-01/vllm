@@ -28,7 +28,7 @@ logger = init_logger(__name__)
 
 _G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
 
-
+# 旧版本的引擎，为了兼容以前的代码。
 class LLMEngine:
     """Legacy LLMEngine for backwards compatibility."""
 

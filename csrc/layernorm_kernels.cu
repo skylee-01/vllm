@@ -13,33 +13,33 @@
 namespace vllm {
 
 // TODO(woosuk): Further optimize this kernel.
-template <typename scalar_t>
-__global__ void rms_norm_kernel(
-    scalar_t* __restrict__ out,           // [..., hidden_size]
-    const scalar_t* __restrict__ input,   // [..., hidden_size]
-    const scalar_t* __restrict__ weight,  // [hidden_size]
-    const float epsilon, const int num_tokens, const int hidden_size) {
-  __shared__ float s_variance;
+template <typename scalar_t>   // 模版函数
+__global__ void rms_norm_kernel(  // cuda、无输出、函数名。
+    scalar_t* __restrict__ out,           // [..., hidden_size]  输出
+    const scalar_t* __restrict__ input,   // [..., hidden_size]  输入
+    const scalar_t* __restrict__ weight,  // [hidden_size] 权重
+    const float epsilon, const int num_tokens, const int hidden_size) {  // 参数、tonken数量、隐藏层大小
+  __shared__ float s_variance; // 共享内存是CUDA中的一种快速内存，可以被同一个block中的所有线程访问。
   float variance = 0.0f;
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     const float x = (float)input[blockIdx.x * hidden_size + idx];
-    variance += x * x;
+    variance += x * x; // 求rms
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x); // 在block内归约所有线程计算的平方和，得到每个token的总平方和。
 
   if (threadIdx.x == 0) {
-    s_variance = rsqrtf(variance / hidden_size + epsilon);
+    s_variance = rsqrtf(variance / hidden_size + epsilon); // 计算归一化因子
   }
-  __syncthreads();
+  __syncthreads();  // 同步线程
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float x = (float)input[blockIdx.x * hidden_size + idx];
     out[blockIdx.x * hidden_size + idx] =
-        ((scalar_t)(x * s_variance)) * weight[idx];
+        ((scalar_t)(x * s_variance)) * weight[idx];  // 计算每个权重的归一化。
   }
 }
 
@@ -101,7 +101,7 @@ fused_add_rms_norm_kernel(
    The width field is not used here but necessary for other specializations.
  */
 template <typename scalar_t, int width>
-__global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
+__global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists> // 条件，决定是否编译这个函数。
 fused_add_rms_norm_kernel(
     scalar_t* __restrict__ input,         // [..., hidden_size]
     scalar_t* __restrict__ residual,      // [..., hidden_size]
@@ -143,13 +143,16 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
 
-  dim3 grid(num_tokens);
+  dim3 grid(num_tokens); // 每个token分配一个线程块。
   dim3 block(std::min(hidden_size, 1024));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input)); //  确保当前计算在输入张量所在的设备上进行。
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();  // 获取当前CUDA流，用于异步执行。
+  // VLLM_DISPATCH_FLOATING_TYPES: 这是一个宏，用于根据输入张量的数据类型（如float、double等）动态选择合适的内核函数。
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel", [&] {
     vllm::rms_norm_kernel<scalar_t><<<grid, block, 0, stream>>>(
-        out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
+    // 这是实际的CUDA内核函数，用于执行RMS归一化操作。
+    //这是CUDA的内核启动语法，指定网格和线程块的配置，以及CUDA流。
+        out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),  // 输入参数
         weight.data_ptr<scalar_t>(), epsilon, num_tokens, hidden_size);
   });
 }

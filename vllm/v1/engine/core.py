@@ -45,22 +45,25 @@ class EngineCore:
                     VLLM_VERSION, vllm_config)
 
         # Setup Model.
+        # 模型执行器
         self.model_executor = executor_class(vllm_config)
 
         # Setup KV Caches and update CacheConfig after profiling.
+        # 缓存块管理
         num_gpu_blocks, num_cpu_blocks = self._initialize_kv_caches(
             vllm_config)
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
         # Setup scheduler.
+        # 调度器
         self.scheduler = Scheduler(
             scheduler_config=vllm_config.scheduler_config,
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
             lora_config=vllm_config.lora_config,
         )
-
+        # 缓存管理
         self.mm_input_mapper_server = MMInputMapperServer(
             vllm_config.model_config)
 
@@ -122,9 +125,9 @@ class EngineCore:
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
-        scheduler_output = self.scheduler.schedule()
-        output = self.model_executor.execute_model(scheduler_output)
-        engine_core_outputs = self.scheduler.update_from_output(
+        scheduler_output = self.scheduler.schedule() # 调度出该计算的requests。
+        output = self.model_executor.execute_model(scheduler_output) # 执行模型推理
+        engine_core_outputs = self.scheduler.update_from_output( # 更新调度。
             scheduler_output, output)
         return engine_core_outputs
 
@@ -138,6 +141,7 @@ class EngineCore:
         self.scheduler.reset_prefix_cache()
 
 
+#
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 

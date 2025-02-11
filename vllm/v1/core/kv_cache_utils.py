@@ -65,7 +65,7 @@ class KVCacheBlock:
         self._block_hash = None
 
 
-class FreeKVCacheBlockQueue:
+class FreeKVCacheBlockQueue: # 释放kv cache块队列。
     """This class organizes a list of KVCacheBlock objects to a doubly linked
     list of free blocks. We implement this class instead of using Python
     builtin deque to support removing a block in the middle of the queue

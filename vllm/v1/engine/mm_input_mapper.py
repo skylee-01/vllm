@@ -9,6 +9,7 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
 from vllm.utils import LRUCache
 
 logger = init_logger(__name__)
+# MM可能是Memory Management（缓存管理）
 
 # The idea of MM preprocessor caching is based on having a client and a server,
 # where the client executes in the frontend process (=P0) and the server in the

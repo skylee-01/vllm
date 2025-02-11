@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-
+"""
+kv cache 的一个基础类。
+"""
 from dataclasses import dataclass
 from typing import Dict, List
 
@@ -93,9 +95,9 @@ class KVCacheConfig:
     The KV cache configuration of a model.
     """
     """The number of KV cache blocks"""
-    num_blocks: int
+    num_blocks: int # kv cache块的数量。
     """layer_name -> how to initialize KV cache for that layer"""
-    tensors: Dict[str, KVCacheTensor]
+    tensors: Dict[str, KVCacheTensor] # tensor字典 {层名称： tensor}
     """
     A list of kv-cache groups. Each group includes a set of layers with
     the same kv-cache spec, and the total page_size of layers inside a group

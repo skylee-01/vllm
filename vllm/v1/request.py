@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-
+"""
+request数据类
+"""
 import enum
 from typing import TYPE_CHECKING, List, Optional, Union
 

@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-
+# 编码器缓存
 class EncoderCacheManager:
 
     def __init__(self, cache_size: int):
@@ -22,14 +22,17 @@ class EncoderCacheManager:
         # List of [req_id, input_id]
         self.freed: List[Tuple[str, int]] = []
 
+    # 缓存是否存在
     def has_cache(self, request: Request, input_id: int) -> bool:
         req_id = request.request_id
         return req_id in self.cached and input_id in self.cached[req_id]
 
+    # 缓存能否分配
     def can_allocate(self, request: Request, input_id: int) -> bool:
         num_tokens = request.get_num_encoder_tokens(input_id)
         return num_tokens <= self.num_free_slots
 
+    # 分配缓存
     def allocate(self, request: Request, input_id: int) -> None:
         req_id = request.request_id
         if req_id not in self.cached:
@@ -37,9 +40,11 @@ class EncoderCacheManager:
         self.cached[req_id].add(input_id)
         self.num_free_slots -= request.get_num_encoder_tokens(input_id)
 
+    # 获取缓存的输入id。
     def get_cached_input_ids(self, request: Request) -> Set[int]:
         return self.cached.get(request.request_id, set())
 
+    # 通过input id 释放编码缓存。
     def free_encoder_input(self, request: Request, input_id: int) -> None:
         """Free a single encoder input id for the request."""
         req_id = request.request_id
@@ -52,18 +57,20 @@ class EncoderCacheManager:
         self.num_free_slots += request.get_num_encoder_tokens(input_id)
         self.freed.append((req_id, input_id))
 
+    # 通过request释放缓存
     def free(self, request: Request) -> None:
         """Free all cached input ids for the request."""
         input_ids = self.get_cached_input_ids(request)
         for input_id in input_ids:
             self.free_encoder_input(request, input_id)
 
+    # 获取释放的id。
     def get_freed_ids(self) -> List[Tuple[str, int]]:
         freed = self.freed
         self.freed = []
         return freed
 
-
+# 计算encoder缓存预算。
 def compute_encoder_budget(
     model_config: "ModelConfig",
     scheduler_config: "SchedulerConfig",
@@ -93,7 +100,7 @@ def compute_encoder_budget(
 
     return encoder_compute_budget, encoder_cache_size
 
-
+# 计算多模态的encoder缓存。
 def _compute_encoder_budget_multimodal(
     model_config: "ModelConfig",
     scheduler_config: "SchedulerConfig",
