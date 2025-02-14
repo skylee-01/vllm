@@ -21,9 +21,9 @@ class BlockHashType(NamedTuple):
     low probability.
     """
     # Hash value of the block in an integer.
-    hash_value: int
+    hash_value: int  # 哈希值
     # Token IDs in the block.
-    token_ids: Tuple[int, ...]
+    token_ids: Tuple[int, ...] # token id
     # Extra keys for the block.
     extra_keys: Optional[Any] = None
 
@@ -32,35 +32,35 @@ class BlockHashType(NamedTuple):
 class KVCacheBlock:
     """KV-cache block metadata."""
     # Block ID, ranging from 0 to num_gpu_blocks - 1.
-    block_id: int
-    # Reference count.
+    block_id: int # 块ID
+    # Reference count. # 引用计数
     ref_cnt: int = 0
     # The hash of the block composed of (block hash, tuple of token IDs).
     # It is only available when the block is full.
-    _block_hash: Optional[BlockHashType] = None
+    _block_hash: Optional[BlockHashType] = None # 块哈希
 
-    # Used to construct a doubly linked list for free blocks.
+    # Used to construct a doubly linked list for free blocks. 为释放的块构建双向链表
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
-    prev_free_block: Optional["KVCacheBlock"] = None
-    next_free_block: Optional["KVCacheBlock"] = None
+    prev_free_block: Optional["KVCacheBlock"] = None # 上一个释放的块
+    next_free_block: Optional["KVCacheBlock"] = None # 下一个释放的块
 
-    def incr_ref(self):
+    def incr_ref(self): # 增加计数
         self.ref_cnt += 1
 
-    def decr_ref(self):
+    def decr_ref(self): # 减去计数
         self.ref_cnt -= 1
 
     @property
-    def block_hash(self) -> Optional[BlockHashType]:
+    def block_hash(self) -> Optional[BlockHashType]: # 获取块哈希
         return self._block_hash
 
     @block_hash.setter
-    def block_hash(self, block_hash: BlockHashType):
+    def block_hash(self, block_hash: BlockHashType): # 传入块哈希
         assert self.block_hash is None, (
             "The block already has a hash. This should not happen.")
         self._block_hash = block_hash
 
-    def reset_hash(self):
+    def reset_hash(self): # 重置块哈希
         """Reset the block hash when the block is evicted."""
         self._block_hash = None
 

@@ -26,12 +26,12 @@ class KVCacheManager:
         enable_caching: bool = True,
         num_preallocate_tokens: int = 64,
     ) -> None:
-        self.block_size = block_size
-        self.num_gpu_blocks = num_gpu_blocks
-        self.max_model_len = max_model_len
-        self.max_num_blocks_per_req = cdiv(max_model_len, block_size)
-        self.sliding_window = sliding_window
-        self.enable_caching = enable_caching
+        self.block_size = block_size # 每个block的大小
+        self.num_gpu_blocks = num_gpu_blocks # 缓存的block数量
+        self.max_model_len = max_model_len # 模型最大的长度
+        self.max_num_blocks_per_req = cdiv(max_model_len, block_size) # 一个block可以存储的最大token数量
+        self.sliding_window = sliding_window # 滑动窗口的大小
+        self.enable_caching = enable_caching # 是否启用缓存
         # NOTE(woosuk): To avoid frequent block allocation, we preallocate some
         # blocks for each request. For example, when a request reaches the end
         # of its block table, we preallocate N blocks in advance. This way, we
@@ -42,17 +42,17 @@ class KVCacheManager:
         # the request gets N empty blocks, it starts to use the blocks without
         # further allocation. When it uses up all the N empty blocks, it gets
         # N new empty blocks.
-        self.num_preallocate_tokens = num_preallocate_tokens
-        self.num_preallocate_blocks = cdiv(num_preallocate_tokens, block_size)
+        self.num_preallocate_tokens = num_preallocate_tokens # 预分配的token数量
+        self.num_preallocate_blocks = cdiv(num_preallocate_tokens, block_size) # 预分配的block数量
 
-        # A Block pool of all kv-cache blocks.
+        # A Block pool of all kv-cache blocks. # 所有kv缓存的池子。
         self.block_pool: List[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
         ]
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is
         # enabled).
-        self.free_block_queue = FreeKVCacheBlockQueue(self.block_pool)
+        self.free_block_queue = FreeKVCacheBlockQueue(self.block_pool) # 已经释放的kv缓存块队列。
 
         # {block_hash: {block ID: block}}. A cached block is
         # a full block with a block hash that can be used for prefix caching.
@@ -64,22 +64,22 @@ class KVCacheManager:
         # we want to make sure the allocated block IDs won't change so that
         # block tables are append-only.
         self.cached_block_hash_to_block: Dict[BlockHashType, Dict[
-            int, KVCacheBlock]] = defaultdict(dict)
+            int, KVCacheBlock]] = defaultdict(dict) # 字典，块哈希>>缓存块。
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
         # is finished.
         self.req_to_blocks: DefaultDict[str,
-                                        List[KVCacheBlock]] = defaultdict(list)
+                                        List[KVCacheBlock]] = defaultdict(list) # 字典，请求>>kv缓存块
 
         # Mapping from request ID to kv block hashes.
         # This is to avoid recomputing the block hashes for each call of
         # `get_computed_blocks` or `allocate_slots`.
         self.req_to_block_hashes: DefaultDict[
-            str, List[BlockHashType]] = defaultdict(list)
+            str, List[BlockHashType]] = defaultdict(list) # 字典，请求>>块哈希
 
     @property
-    def usage(self) -> float:
+    def usage(self) -> float: # 利用率。
         return 1.0 - (self.free_block_queue.num_free_blocks /
                       self.num_gpu_blocks)
 
