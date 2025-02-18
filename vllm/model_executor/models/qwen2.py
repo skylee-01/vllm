@@ -34,18 +34,18 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+from vllm.model_executor.layers.activation import SiluAndMul # 激活函数
+from vllm.model_executor.layers.layernorm import RMSNorm # 归一化
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear, 
                                                QKVParallelLinear,
-                                               RowParallelLinear)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.pooler import Pooler, PoolingType
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
+                                               RowParallelLinear) # 线性层。
+from vllm.model_executor.layers.logits_processor import LogitsProcessor # logits计算
+from vllm.model_executor.layers.pooler import Pooler, PoolingType # 池化
+from vllm.model_executor.layers.quantization import QuantizationConfig # 量化配置
+from vllm.model_executor.layers.rotary_embedding import get_rope # RoPE
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler # 采样器
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
+    ParallelLMHead, VocabParallelEmbedding) # 词嵌入
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.pooling_metadata import PoolingMetadata
@@ -443,7 +443,7 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
+        quant_config = vllm_config.quant_config # 量化配置
         lora_config = vllm_config.lora_config
 
         self.config = config

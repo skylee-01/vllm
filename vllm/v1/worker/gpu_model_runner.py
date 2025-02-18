@@ -59,11 +59,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
 
-        model_config = self.model_config
-        cache_config = self.cache_config
-        scheduler_config = self.scheduler_config
-        parallel_config = self.parallel_config
-        self.device = device
+        model_config = self.model_config # 模型配置
+        cache_config = self.cache_config # 缓存配置
+        scheduler_config = self.scheduler_config # 调度配置
+        parallel_config = self.parallel_config # 平行话配置
+        self.device = device # 设备
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
         if cache_config.cache_dtype == "auto":
@@ -72,49 +72,49 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
 
-        self.is_multimodal_model = model_config.is_multimodal_model
-        self.sliding_window = model_config.get_sliding_window()
-        self.block_size = cache_config.block_size
-        self.max_model_len = model_config.max_model_len
-        self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
-        self.max_num_tokens = scheduler_config.max_num_batched_tokens
-        self.max_num_reqs = scheduler_config.max_num_seqs
+        self.is_multimodal_model = model_config.is_multimodal_model # 多模态模型
+        self.sliding_window = model_config.get_sliding_window() # 滑动窗口
+        self.block_size = cache_config.block_size # 块大小
+        self.max_model_len = model_config.max_model_len # 模型最大长度
+        self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size) # 每个请求最大的块。
+        self.max_num_tokens = scheduler_config.max_num_batched_tokens # batch最大的token数。
+        self.max_num_reqs = scheduler_config.max_num_seqs # 最大的seq数
 
-        # Model-related.
-        self.num_attn_layers = model_config.get_num_layers_by_block_type(
+        # Model-related. 模型相关
+        self.num_attn_layers = model_config.get_num_layers_by_block_type( # attn层数
             parallel_config, LayerBlockType.attention)
-        self.num_query_heads = model_config.get_num_attention_heads(
+        self.num_query_heads = model_config.get_num_attention_heads( # attn head数量
             parallel_config)
-        self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
-        self.head_size = model_config.get_head_size()
-        self.hidden_size = model_config.get_hidden_size()
+        self.num_kv_heads = model_config.get_num_kv_heads(parallel_config) #kv cache head数量
+        self.head_size = model_config.get_head_size() # head大小。
+        self.hidden_size = model_config.get_hidden_size() # 隐层大小。
 
-        # Multi-modal data support
-        self.input_registry = INPUT_REGISTRY
-        self.mm_registry = MULTIMODAL_REGISTRY
-        self.uses_mrope = model_config.uses_mrope
+        # Multi-modal data support 多模态支持
+        self.input_registry = INPUT_REGISTRY # 输入
+        self.mm_registry = MULTIMODAL_REGISTRY # 多模态模型
+        self.uses_mrope = model_config.uses_mrope # 使用rope编码
 
         # NOTE: Initialized input mapper is only used for processing dummy
         # multimodal data into multimodal kwargs for GPU memory profiling.
         self.mm_input_mapper_profiling = MMInputMapperClient(self.model_config)
         self.mm_input_mapper_profiling.use_cache = False
 
-        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
+        encoder_compute_budget, encoder_cache_size = compute_encoder_budget( # encoder计算预算、缓存预算。
             model_config=model_config,
             scheduler_config=scheduler_config,
         )
         self.max_num_encoder_input_tokens = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
 
-        # Lazy initialization
+        # Lazy initialization  晚点初始化。
         # self.model: nn.Module  # Set after load_model
-        self.kv_caches: List[torch.Tensor] = []
+        self.kv_caches: List[torch.Tensor] = []  # kv cache。
         # req_id -> (input_id -> encoder_output)
-        self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
+        self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {} # 编码cache。
 
         # Request states.
-        self.requests: Dict[str, CachedRequestState] = {}
-        # Persistent batch.
+        self.requests: Dict[str, CachedRequestState] = {}  # 请求状态。
+        # Persistent batch. 连续batch
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -123,7 +123,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             pin_memory=self.pin_memory,
             vocab_size=model_config.get_vocab_size(),
         )
-
+        # 使用cuda图。
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE
                                and not self.model_config.enforce_eager)
@@ -135,11 +135,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             reversed(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
 
-        # Cache the device properties.
+        # Cache the device properties. 设备属性
         self.device_properties = torch.cuda.get_device_properties(self.device)
         self.num_sms = self.device_properties.multi_processor_count
 
-        # Persistent buffers for CUDA graphs.
+        # Persistent buffers for CUDA graphs. CUDA图的持久化缓冲区。
         self.input_ids = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int32,
                                      device=self.device)
@@ -218,7 +218,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             True if there is a new/resumed/paused/finished request in the batch.
             If False, we can skip copying SamplingMetadata to the GPU.
         """
-        # Remove finished requests from the cached states.
+        # Remove finished requests from the cached states. # 从缓存中移除已完成的请求。
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.encoder_cache.pop(req_id, None)
@@ -363,7 +363,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.condense(removed_req_indices)
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
 
-    def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
+    def _prepare_inputs(self, scheduler_output: "SchedulerOutput"): # 准备输入。
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -528,7 +528,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _compute_cascade_attn_prefix_len(
         self,
-        num_scheduled_tokens: np.ndarray,
+        num_scheduled_tokens: np.ndarray, 
         num_common_prefix_blocks: int,
     ) -> int:
         """Compute the length of the common prefix for cascade attention.
@@ -678,7 +678,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id_output_token_ids, skip_copy=not batch_changed)
         return sampling_metadata
 
-    def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
+    def _execute_encoder(self, scheduler_output: "SchedulerOutput"): # 执行encoder，多模态功能。
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
             return
@@ -726,7 +726,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.encoder_cache[req_id] = {}
             self.encoder_cache[req_id][input_id] = output
 
-    def _gather_encoder_outputs(
+    def _gather_encoder_outputs( # 聚合encoder的输出。
         self,
         scheduler_output: "SchedulerOutput",
     ) -> List[torch.Tensor]:
@@ -770,22 +770,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return self.model
 
     @torch.inference_mode()
-    def execute_model(
+    def execute_model( # 执行模型
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
-        batch_changed = self._update_states(scheduler_output)
+        batch_changed = self._update_states(scheduler_output) # 更新状态
 
-        if self.is_multimodal_model:
+        if self.is_multimodal_model: # 是否为多模态
             # Run the multimodal encoder if any.
-            self._execute_encoder(scheduler_output)
-            encoder_outputs = self._gather_encoder_outputs(scheduler_output)
+            self._execute_encoder(scheduler_output) # 执行多模态编码
+            encoder_outputs = self._gather_encoder_outputs(scheduler_output) # 聚合encoder的输出   
         else:
             encoder_outputs = []
 
         # Prepare the decoder inputs.
-        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
-        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output) # 准备encoder的输入
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens # 获取调度的token数量
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use piecewise CUDA graphs.
@@ -797,7 +797,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_input_tokens = num_scheduled_tokens
         attn_metadata.num_input_tokens = num_input_tokens
 
-        if self.is_multimodal_model:
+        if self.is_multimodal_model: # 如果是多模态模型
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
@@ -818,14 +818,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # then the embedding layer is not included in the CUDA graph.
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
-        if self.uses_mrope:
+        if self.uses_mrope: # 是否使用mrope
             positions = self.mrope_positions[:, :num_input_tokens]
         else:
             positions = self.positions[:num_input_tokens]
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
-        with set_forward_context(attn_metadata, self.vllm_config):
+        with set_forward_context(attn_metadata, self.vllm_config): # 调用模型计算。
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=positions,
@@ -833,9 +833,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 attn_metadata=None,
                 inputs_embeds=inputs_embeds,
             )
-        hidden_states = hidden_states[:num_scheduled_tokens]
-        sample_hidden_states = hidden_states[logits_indices]
-        logits = self.model.compute_logits(sample_hidden_states, None)
+        hidden_states = hidden_states[:num_scheduled_tokens] # 隐层状态
+        sample_hidden_states = hidden_states[logits_indices] # 采样隐层状态
+        logits = self.model.compute_logits(sample_hidden_states, None) # 计算logits
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self._prepare_sampling(batch_changed)
@@ -844,7 +844,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampling_metadata=sampling_metadata,
         )
 
-        # TODO(woosuk): The following loop can be slow since it iterates over
+        # TODO(woosuk): The following loop can be slow since it iterates over 处理请求序列长度
         # the requests one by one. Optimize.
         num_reqs = self.input_batch.num_reqs
         request_seq_lens: List[Tuple[int, CachedRequestState, int]] = []
@@ -875,26 +875,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
         req_ids = cast(List[str], self.input_batch.req_ids[:num_reqs])
 
-        # NOTE: GPU -> CPU Sync happens here.
+        # NOTE: GPU -> CPU Sync happens here.  同步GPU和CPU数据 
         # Move as many CPU operations as possible before this sync point.
         sampled_token_ids = sampler_output.sampled_token_ids.tolist()
         logprobs_tensors = sampler_output.logprobs_tensors
         logprobs_lists = logprobs_tensors.tolists() \
             if logprobs_tensors is not None else None
 
-        # Compute prompt logprobs if needed.
+        # Compute prompt logprobs if needed.  计算提示logprobs
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
             hidden_states,
             scheduler_output,
         )
 
-        # Update with the actual token ids
+        # Update with the actual token ids 更新实际token ID
         for i, req_state, seq_len in request_seq_lens:
             token_id = sampled_token_ids[i]
             self.input_batch.token_ids_cpu[i, seq_len] = token_id
             req_state.output_token_ids[-1] = token_id
 
-        model_runner_output = ModelRunnerOutput(
+        model_runner_output = ModelRunnerOutput( # 返回模型推理结果
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=sampled_token_ids,
@@ -903,7 +903,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return model_runner_output
 
-    def load_model(self) -> None:
+    def load_model(self) -> None: # 加载模型
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
@@ -1178,7 +1178,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / (1 << 30))
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None: # 初始化kv cache
         """
         Initialize KV cache based on `kv_cache_config`.
         Args:
@@ -1212,7 +1212,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+    def get_kv_cache_spec(self) -> KVCacheSpec: #
         """
         Generates the KVCacheSpec by parsing the kv cache format from each 
         Attention module in the static forward context.

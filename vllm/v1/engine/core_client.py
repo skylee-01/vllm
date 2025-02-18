@@ -159,11 +159,11 @@ class MPClient(EngineCoreClient):
 
         signal.signal(signal.SIGUSR1, sigusr1_handler)
 
-        # Serialization setup.
+        # Serialization setup.  序列化
         self.encoder = MsgpackEncoder()
         self.decoder = MsgpackDecoder(EngineCoreOutputs)
 
-        # ZMQ setup.
+        # ZMQ setup. 队列
         self.ctx = (
             zmq.asyncio.Context()  # type: ignore[attr-defined]
             if asyncio_mode else zmq.Context())  # type: ignore[attr-defined]
@@ -181,7 +181,7 @@ class MPClient(EngineCoreClient):
         self.input_socket = make_zmq_socket(self.ctx, input_path,
                                             zmq.constants.PUSH)
 
-        # Start EngineCore in background process.
+        # Start EngineCore in background process. # 在后台启动引擎。
         self.proc_handle = BackgroundProcHandle(
             input_path=input_path,
             output_path=output_path,
@@ -213,16 +213,16 @@ class SyncMPClient(MPClient):
             log_stats=False,
         )
 
-    def get_output(self) -> EngineCoreOutputs:
+    def get_output(self) -> EngineCoreOutputs:  # 获取输出。
 
-        (frame, ) = self.output_socket.recv_multipart(copy=False)
-        return self.decoder.decode(frame.buffer)
+        (frame, ) = self.output_socket.recv_multipart(copy=False)   # 先从队列中取出来。
+        return self.decoder.decode(frame.buffer) # 反序列化。
 
-    def _send_input(self, request_type: EngineCoreRequestType,
+    def _send_input(self, request_type: EngineCoreRequestType, # 给队列发送请求的方法。
                     request: Any) -> None:
 
         # (RequestType, SerializedRequest)
-        msg = (request_type.value, self.encoder.encode(request))
+        msg = (request_type.value, self.encoder.encode(request)) # 序列化，然后扔到队列中。
         self.input_socket.send_multipart(msg, copy=False)
 
     def add_request(self, request: EngineCoreRequest) -> None:
@@ -243,7 +243,7 @@ class SyncMPClient(MPClient):
 
 
 class AsyncMPClient(MPClient):
-    """Asyncio-compatible client for multi-proc EngineCore."""
+    """Asyncio-compatible client for multi-proc EngineCore.""" # 方法与上面的一致，写法都是异步的。
 
     def __init__(self, vllm_config: VllmConfig,
                  executor_class: Type[Executor]):

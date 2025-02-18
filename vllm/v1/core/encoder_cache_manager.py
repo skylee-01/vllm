@@ -71,7 +71,7 @@ class EncoderCacheManager:
         return freed
 
 # 计算encoder缓存预算。
-def compute_encoder_budget(
+def compute_encoder_budget( 
     model_config: "ModelConfig",
     scheduler_config: "SchedulerConfig",
 ) -> Tuple[int, int]:
@@ -100,7 +100,7 @@ def compute_encoder_budget(
 
     return encoder_compute_budget, encoder_cache_size
 
-# 计算多模态的encoder缓存。
+# 计算多模态的encoder缓存。 
 def _compute_encoder_budget_multimodal(
     model_config: "ModelConfig",
     scheduler_config: "SchedulerConfig",
@@ -134,7 +134,7 @@ def _compute_encoder_budget_multimodal(
 
     encoder_compute_budget = max(scheduler_config.max_num_encoder_input_tokens,
                                  max_tokens_per_mm_item)
-    encoder_cache_size = max(scheduler_config.encoder_cache_size,
+    encoder_cache_size = max(scheduler_config.encoder_cache_size, 
                              max_tokens_per_mm_item)
 
     return encoder_compute_budget, encoder_cache_size

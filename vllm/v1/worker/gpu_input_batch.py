@@ -47,12 +47,12 @@ class InputBatch:
 
     def __init__(
         self,
-        max_num_reqs: int,
-        max_model_len: int,
-        max_num_blocks_per_req: int,
-        device: torch.device,
-        pin_memory: bool,
-        vocab_size: int,
+        max_num_reqs: int, # 最大请求数
+        max_model_len: int, # 最大模型长度
+        max_num_blocks_per_req: int, # 每个请求的最大块数
+        device: torch.device, # 设备
+        pin_memory: bool, # 是否使用pin_memory
+        vocab_size: int, # 词汇表大小
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -68,19 +68,19 @@ class InputBatch:
         # Find a way to reduce the CPU memory usage.
         # This buffer is not directly transferred to the GPU, so it does not
         # need to be pinned.
-        self.token_ids_cpu_tensor = torch.zeros(
+        self.token_ids_cpu_tensor = torch.zeros( # token_ids_cpu_tensor是一个cpu张量，用于存储token_ids
             (max_num_reqs, max_model_len),
             device="cpu",
             dtype=torch.int32,
             pin_memory=False,
         )
-        self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
-        self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
-        self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
-        self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
+        self.token_ids_cpu = self.token_ids_cpu_tensor.numpy() # token_ids_cpu是一个numpy数组，用于存储token_ids
+        self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32) # num_tokens是一个numpy数组，用于存储每个请求的token数
+        self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32) # num_prompt_tokens是一个numpy数组，用于存储每个请求的prompt token数
+        self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32) # num_computed_tokens_cpu是一个numpy数组，用于存储每个请求的已经计算的token数
 
         # Block table.
-        self.block_table = BlockTable(
+        self.block_table = BlockTable( # 存储每个请求的block信息
             max_num_reqs=max_num_reqs,
             max_model_len=max_model_len,
             max_num_blocks_per_req=max_num_blocks_per_req,
@@ -88,19 +88,19 @@ class InputBatch:
             device=device,
         )
 
-        # Sampling-related.
-        self.temperature = torch.empty((max_num_reqs, ),
+        # Sampling-related. 采样相关
+        self.temperature = torch.empty((max_num_reqs, ),  # 温度系数
                                        dtype=torch.float32,
                                        device=device)
         self.temperature_cpu_tensor = torch.empty((max_num_reqs, ),
                                                   dtype=torch.float32,
                                                   device="cpu",
                                                   pin_memory=pin_memory)
-        self.temperature_cpu = self.temperature_cpu_tensor.numpy()
-        self.greedy_reqs: Set[str] = set()
-        self.random_reqs: Set[str] = set()
+        self.temperature_cpu = self.temperature_cpu_tensor.numpy() 
+        self.greedy_reqs: Set[str] = set() # 贪心采样的请求
+        self.random_reqs: Set[str] = set() # 随机采样的请求
 
-        self.top_p = torch.empty((max_num_reqs, ),
+        self.top_p = torch.empty((max_num_reqs, ), # top_p
                                  dtype=torch.float32,
                                  device=device)
         self.top_p_cpu_tensor = torch.empty((max_num_reqs, ),
@@ -110,7 +110,7 @@ class InputBatch:
         self.top_p_cpu = self.top_p_cpu_tensor.numpy()
         self.top_p_reqs: Set[str] = set()
 
-        self.top_k = torch.empty((max_num_reqs, ),
+        self.top_k = torch.empty((max_num_reqs, ), # top_k
                                  dtype=torch.int32,
                                  device=device)
         self.top_k_cpu_tensor = torch.empty((max_num_reqs, ),
@@ -118,9 +118,9 @@ class InputBatch:
                                             device="cpu",
                                             pin_memory=pin_memory)
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
-        self.top_k_reqs: Set[str] = set()
+        self.top_k_reqs: Set[str] = set() # top_k采样request id
 
-        # Frequency penalty related data structures
+        # Frequency penalty related data structures 频率惩罚
         self.frequency_penalties = torch.empty((max_num_reqs, ),
                                                dtype=torch.float,
                                                device=device)
@@ -145,7 +145,7 @@ class InputBatch:
             self.presence_penalties_cpu_tensor.numpy()
         self.presence_penalties_reqs: Set[str] = set()
 
-        # Repetition penalty related data structures
+        # Repetition penalty related data structures 重复惩罚
         self.repetition_penalties = torch.empty((max_num_reqs, ),
                                                 dtype=torch.float,
                                                 device=device)
@@ -164,7 +164,7 @@ class InputBatch:
         ]
         self.prompt_token_ids: Optional[torch.Tensor] = None
 
-        # lora related
+        # lora related # lora相关
         self.request_lora_mapping = np.zeros((self.max_num_reqs, ),
                                              dtype=np.int32)
         self.lora_id_to_request_ids: Dict[int, Set[str]] = {}

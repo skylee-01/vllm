@@ -37,7 +37,7 @@ class Scheduler:
         self.cache_config = cache_config
         self.lora_config = lora_config
 
-        # Scheduling constraints.
+        # Scheduling constraints. 调度约束。
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = \
             self.scheduler_config.max_num_batched_tokens
@@ -45,31 +45,31 @@ class Scheduler:
 
         num_gpu_blocks = cache_config.num_gpu_blocks
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
-        # Create the KV cache manager.
+        # Create the KV cache manager.  # 初始化kv cache管理类。
         self.kv_cache_manager = KVCacheManager(
-            block_size=self.cache_config.block_size,
-            num_gpu_blocks=num_gpu_blocks,
-            max_model_len=self.max_model_len,
-            sliding_window=self.cache_config.sliding_window,
-            enable_caching=self.cache_config.enable_prefix_caching)
+            block_size=self.cache_config.block_size, # 块大小
+            num_gpu_blocks=num_gpu_blocks, # gpu块
+            max_model_len=self.max_model_len, # 模型长度
+            sliding_window=self.cache_config.sliding_window, # 滑动窗口
+            enable_caching=self.cache_config.enable_prefix_caching) # 前缀缓存。
         self.block_size = self.cache_config.block_size
 
         # req_id -> Request
-        self.requests: Dict[str, Request] = {}
+        self.requests: Dict[str, Request] = {} # 请求id的字典。
         # Priority queues for requests.
-        self.waiting: Deque[Request] = deque()
-        self.running: List[Request] = []
+        self.waiting: Deque[Request] = deque() # 等待队列
+        self.running: List[Request] = [] # 运行队列。
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
-        self.finished_req_ids: Set[str] = set()
+        self.finished_req_ids: Set[str] = set()  # 完成的ids
 
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
         # Request id -> CachedRequestData
-        self._cached_reqs_data: Dict[str, CachedRequestData] = {}
+        self._cached_reqs_data: Dict[str, CachedRequestData] = {}  # 缓存请求，避免每次调度都创建。
 
         # Encoder-related.
         # Calculate encoder cache size if applicable

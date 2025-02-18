@@ -72,14 +72,14 @@ class FlashAttentionMetadata:
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
 
-    # For cascade attention.
+    # For cascade attention. 级联注意力。
     use_cascade: bool
     common_prefix_len: int
     cu_prefix_query_lens: Optional[torch.Tensor]
     prefix_kv_lens: Optional[torch.Tensor]
     suffix_kv_lens: Optional[torch.Tensor]
 
-    # For logging.
+    # For logging. 
     num_input_tokens: int = 0  # Number of tokens including padding.
 
 
@@ -141,10 +141,10 @@ class FlashAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
-        output: Optional[torch.Tensor] = None,
+        attn_metadata: FlashAttentionMetadata, 
+        output: Optional[torch.Tensor] = None, 
     ) -> torch.Tensor:
-        """Forward pass with FlashAttention.
+        """Forward pass with FlashAttention. 
 
         Args:
             query: shape = [num_tokens, num_heads, head_size]

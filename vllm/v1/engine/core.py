@@ -63,7 +63,7 @@ class EngineCore:
             cache_config=vllm_config.cache_config,
             lora_config=vllm_config.lora_config,
         )
-        # 缓存管理
+        # 多模态输入管理
         self.mm_input_mapper_server = MMInputMapperServer(
             vllm_config.model_config)
 
@@ -72,20 +72,21 @@ class EngineCore:
         start = time.time()
 
         # Get all kv cache needed by the model
-        kv_cache_spec = self.model_executor.get_kv_cache_spec()
+        kv_cache_spec = self.model_executor.get_kv_cache_spec() # 计算所需的所有kv cache。
 
         # Profiles the peak memory usage of the model to determine how much
         # memory can be allocated for kv cache.
-        availble_gpu_memory = self.model_executor.determine_available_memory()
+        availble_gpu_memory = self.model_executor.determine_available_memory() # 评估峰值内存
 
-        # Get the kv cache tensor size
+
+        # Get the kv cache tensor size # 获取kv cache tensor的大小。
         kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
                                               availble_gpu_memory)
         num_gpu_blocks = kv_cache_config.num_blocks
         num_cpu_blocks = 0
 
         # Initialize kv cache and warmup the execution
-        self.model_executor.initialize(kv_cache_config)
+        self.model_executor.initialize(kv_cache_config)  # 在执行器上初始化缓存。
 
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
@@ -119,7 +120,7 @@ class EngineCore:
                                        RequestStatus.FINISHED_ABORTED)
 
     def step(self) -> EngineCoreOutputs:
-        """Schedule, execute, and make output."""
+        """Schedule, execute, and make output.""" # 调度、推理、输出。
 
         if not self.scheduler.has_unfinished_requests():
             return EngineCoreOutputs(

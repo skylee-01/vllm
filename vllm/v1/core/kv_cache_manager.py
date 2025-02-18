@@ -52,7 +52,7 @@ class KVCacheManager:
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is
         # enabled).
-        self.free_block_queue = FreeKVCacheBlockQueue(self.block_pool) # 已经释放的kv缓存块队列。
+        self.free_block_queue = FreeKVCacheBlockQueue(self.block_pool) # 释放的kv缓存块队列。 把链表关系建立上。
 
         # {block_hash: {block ID: block}}. A cached block is
         # a full block with a block hash that can be used for prefix caching.
@@ -84,7 +84,7 @@ class KVCacheManager:
                       self.num_gpu_blocks)
 
     def get_computed_blocks(
-            self, request: Request) -> Tuple[List[KVCacheBlock], int]: # 获取计算的块
+            self, request: Request) -> Tuple[List[KVCacheBlock], int]: # 根据requestid获取缓存块。
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
@@ -124,7 +124,7 @@ class KVCacheManager:
         num_computed_tokens = len(computed_blocks) * self.block_size
         return computed_blocks, num_computed_tokens
 
-    def allocate_slots( # 为请求分配slots
+    def allocate_slots( # 为request分配缓存块。
         self,
         request: Request,
         num_tokens: int,
