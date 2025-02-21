@@ -23,23 +23,23 @@ class FlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
-    def get_supported_head_sizes() -> List[int]:
+    def get_supported_head_sizes() -> List[int]: # 支持的头大小·
         return [32, 64, 96, 128, 160, 192, 224, 256]
 
     @staticmethod
-    def get_name() -> str:
+    def get_name() -> str: # 名称
         return "FLASH_ATTN_VLLM_V1"
 
     @staticmethod
-    def get_impl_cls() -> Type["FlashAttentionImpl"]:
+    def get_impl_cls() -> Type["FlashAttentionImpl"]: # attention实现
         return FlashAttentionImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
+    def get_metadata_cls() -> Type["AttentionMetadata"]: # attention元数据。
         return FlashAttentionMetadata
 
     @staticmethod
-    def get_kv_cache_shape(
+    def get_kv_cache_shape( # 获取kv缓存形状
         num_blocks: int,
         block_size: int,
         num_kv_heads: int,
@@ -50,12 +50,12 @@ class FlashAttentionBackend(AttentionBackend):
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
+    def use_cascade_attention(*args, **kwargs) -> bool: # 是否使用级联注意力
         return use_cascade_attention(*args, **kwargs)
 
 
 @dataclass
-class FlashAttentionMetadata:
+class FlashAttentionMetadata: # attention元数据。
     # NOTE(sang): Definition of context_len, query_len, and seq_len.
     # |---------- N-1 iteration --------|
     # |---------------- N iteration ---------------------|
@@ -83,20 +83,20 @@ class FlashAttentionMetadata:
     num_input_tokens: int = 0  # Number of tokens including padding.
 
 
-class FlashAttentionImpl(AttentionImpl):
+class FlashAttentionImpl(AttentionImpl): # attention实现
 
     def __init__(
         self,
         num_heads: int,
         head_size: int,
-        scale: float,
+        scale: float, # 缩放因子 
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: Optional[List[float]], # 注意力的斜角
+        sliding_window: Optional[int], # 滑动窗口
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
-        logits_soft_cap: Optional[float] = None,
-        attn_type: AttentionType = AttentionType.DECODER,
+        blocksparse_params: Optional[Dict[str, Any]] = None, # 块稀疏参数
+        logits_soft_cap: Optional[float] = None, # 对数soft
+        attn_type: AttentionType = AttentionType.DECODER, # 注意力类型
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(

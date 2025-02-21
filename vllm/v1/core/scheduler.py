@@ -124,7 +124,7 @@ class Scheduler:
         # First, schedule the RUNNING requests. 首先调度运行中的请求。
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
-            request = self.running[req_index]
+            request = self.running[req_index] # 计算当前query需要的token数量。
             num_new_tokens = request.num_tokens - request.num_computed_tokens
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
@@ -144,7 +144,7 @@ class Scheduler:
                 req_index += 1
                 continue
 
-            while True:
+            while True: # 如果kv cache没有空间，则将running队列中最后一个请求转移到waiting队列。
                 new_blocks = self.kv_cache_manager.allocate_slots( # 分配新块
                     request, num_new_tokens)
                 if new_blocks is None: # 如果没有可用的块，则尝试抢占最不优先的请求
@@ -156,7 +156,7 @@ class Scheduler:
                     preempted_req.num_computed_tokens = 0 # 设置已计算令牌数量为0
 
                     self.waiting.appendleft(preempted_req) # 将抢占的请求加入等待队列
-                    preempted_reqs.append(preempted_req) # 将抢占的请求加入抢占队列
+                    preempted_reqs.append(preempted_req) # 记录抢占的requ
                     if preempted_req == request: # 如果抢占的请求是当前请求，则跳出循环
                         # No more request to preempt.
                         can_schedule = False
@@ -187,7 +187,7 @@ class Scheduler:
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_budget = new_encoder_budget
 
-        # Record the LoRAs in scheduled_running_reqs # 记录LoRAs
+        # Record the LoRAs in scheduled_running_reqs # 记录调度后需要计算请求的LoRA数据。
         requested_loras: Set[int] = set()
         if self.lora_config:
             requested_loras = set(
@@ -195,16 +195,16 @@ class Scheduler:
                 if req.lora_request and req.lora_request.lora_int_id > 0)
             assert len(requested_loras) <= self.lora_config.max_loras
 
-        # Next, schedule the WAITING requests. 接下来调度等待中的请求。
+        # Next, schedule the WAITING requests. 接下来调度等待的请求。
         if not preempted_reqs:
             while self.waiting and token_budget > 0:
-                if len(self.running) == self.max_num_running_reqs:
+                if len(self.running) == self.max_num_running_reqs: # 最大seq数是否到达最大值。
                     break
 
                 request = self.waiting[0]
 
                 # Check that adding the request still respects the max_loras
-                # constraint.
+                # constraint. # 检查是否超过最大LoRA数量。
                 if self.lora_config and request.lora_request:
                     req_lora_id = request.lora_request.lora_int_id
                     if len(requested_loras) == self.lora_config.max_loras and (
@@ -219,14 +219,14 @@ class Scheduler:
                         # This is too conservative and could be optimized.
                         break
 
-                # Get already-cached tokens.
+                # Get already-cached tokens. # 获取已缓存的令牌。
                 computed_blocks, num_computed_tokens = \
                     self.kv_cache_manager.get_computed_blocks(request)
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed requests,
                 # which have output tokens.
-                num_new_tokens = request.num_tokens - num_computed_tokens
+                num_new_tokens = request.num_tokens - num_computed_tokens # 减去已经计算过的token。
                 if num_new_tokens == 0:
                     # This happens when prompt length is divisible by the block
                     # size and all blocks are cached. Now we force to recompute
@@ -241,7 +241,7 @@ class Scheduler:
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
 
-                # Schedule encoder inputs.
+                # Schedule encoder inputs. # 调度encoder输入。
                 (encoder_inputs_to_schedule, num_new_tokens,
                  new_encoder_budget) = self._try_schedule_encoder_inputs(
                      request, num_computed_tokens, num_new_tokens,
@@ -250,7 +250,7 @@ class Scheduler:
                     # The request cannot be scheduled.
                     break
 
-                new_blocks = self.kv_cache_manager.allocate_slots(
+                new_blocks = self.kv_cache_manager.allocate_slots( # 分配新块。
                     request, num_new_tokens, computed_blocks)
                 if new_blocks is None:
                     # The request cannot be scheduled.
@@ -296,8 +296,8 @@ class Scheduler:
         assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
                 len(scheduled_running_reqs) <= len(self.running))
 
-        # Get the longest common prefix among all requests in the running queue.
-        # This can be potentially used for cascade attention.
+        # Get the longest common prefix among all requests in the running queue. # 获取运行队列中所有请求的最长公共前缀。
+        # This can be potentially used for cascade attention. # 使用到级联解码。
         num_common_prefix_blocks = 0
         if self.running:
             any_request = self.running[0]
@@ -397,29 +397,29 @@ class Scheduler:
         • 有足够的编码器令牌预算来处理它。
         • 编码器缓存有足够的空间来存储它。如果由于缓存或预算限制而无法调度编码器输入，该方法将调整   num_new_tokens  ，以便仅调度解码器令牌，直到无法调度的编码器输入之前。
         """
-        if not request.has_encoder_inputs():
+        if not request.has_encoder_inputs(): # 如果没有encoder输入，则返回空列表。
             return [], num_new_tokens, encoder_budget
 
-        encoder_inputs_to_schedule: List[int] = []
-        mm_positions = request.mm_positions
+        encoder_inputs_to_schedule: List[int] = [] # 最终被调度的encoder输入。
+        mm_positions = request.mm_positions # 便利encoder的占位符。
         assert mm_positions is not None
         assert len(mm_positions) > 0
         for i, pos_info in enumerate(mm_positions):
-            start_pos = pos_info["offset"]
-            num_encoder_tokens = pos_info["length"]
+            start_pos = pos_info["offset"] # 位置。
+            num_encoder_tokens = pos_info["length"] # 编码长度。
 
-            # The encoder output is needed if the two ranges overlap:
-            # [num_computed_tokens, num_computed_tokens + num_new_tokens) and
-            # [start_pos, start_pos + num_encoder_tokens)
+            # The encoder output is needed if the two ranges overlap: 
+            # [num_computed_tokens, num_computed_tokens + num_new_tokens) and 
+            # [start_pos, start_pos + num_encoder_tokens) 
             if start_pos >= num_computed_tokens + num_new_tokens:
-                # The encoder input is not needed in this step.
+                # The encoder input is not needed in this step. # 现在计算的长度还未到达起始位置。
                 break
-            if start_pos + num_encoder_tokens <= num_computed_tokens:
-                # The encoder input is already computed and stored
-                # in the decoder's KV cache.
+            if start_pos + num_encoder_tokens <= num_computed_tokens: # 如果计算的长度已经超过起始位置，则跳过。
+                # The encoder input is already computed and stored 
+                # in the decoder's KV cache.  # encoder输入已经计算并存储在decoder的kv缓存中。
                 continue
 
-            if self.encoder_cache_manager.has_cache(request, i):
+            if self.encoder_cache_manager.has_cache(request, i): # 判断是否已经计算。
                 # The encoder input is already computed and cached.
                 continue
             if (not self.encoder_cache_manager.can_allocate(request, i)
@@ -440,8 +440,8 @@ class Scheduler:
                     num_new_tokens = 0
                 break
 
-            encoder_budget -= num_encoder_tokens
-            encoder_inputs_to_schedule.append(i)
+            encoder_budget -= num_encoder_tokens # 跟新预算。
+            encoder_inputs_to_schedule.append(i) # 添加到调度列表。
         return encoder_inputs_to_schedule, num_new_tokens, encoder_budget
 
     def update_from_output(
@@ -541,13 +541,13 @@ class Scheduler:
 
     # 检查是否停止。
     def _check_stop(self, request: Request) -> bool:
-        if (request.num_tokens >= self.max_model_len
-                or request.num_output_tokens >= request.max_tokens):
+        if (request.num_tokens >= self.max_model_len 
+                or request.num_output_tokens >= request.max_tokens): # 检查是否达到最大长度。
             request.status = RequestStatus.FINISHED_LENGTH_CAPPED
             return True
 
         sampling_params = request.sampling_params
-        last_token_id = request.output_token_ids[-1]
+        last_token_id = request.output_token_ids[-1] # 获取最后一个token是否命中停止id或者eos。 
         if (not sampling_params.ignore_eos
                 and last_token_id == request.eos_token_id):
             request.status = RequestStatus.FINISHED_STOPPED
@@ -560,8 +560,8 @@ class Scheduler:
         return False
 
     def add_request(self, request: Request) -> None:
-        self.waiting.append(request)
-        self.requests[request.request_id] = request
+        self.waiting.append(request) # 等待队列。
+        self.requests[request.request_id] = request 
 
     def finish_requests(
         self,
@@ -569,14 +569,14 @@ class Scheduler:
         finished_status: RequestStatus,
     ) -> None:
         """Handles the finish signal from outside the scheduler.
-
+        
         For example, the API server can abort a request when the client
         disconnects.
         """
         assert RequestStatus.is_finished(finished_status)
         if isinstance(request_ids, str):
             request_ids = (request_ids, )
-        request_ids = set(request_ids)
+        request_ids = set(request_ids) # 
 
         for req_id in request_ids:
             request = self.requests.get(req_id)
@@ -663,7 +663,7 @@ class CachedRequestData:
     new_block_ids: List[int]
     num_computed_tokens: int
 
-    @classmethod
+    @classmethod # 数据类的初始化写法。
     def from_request(
         cls,
         request: Request,
@@ -682,13 +682,13 @@ class CachedRequestData:
 @dataclass
 class SchedulerOutput:
 
-    scheduled_new_reqs: List[NewRequestData]
-    scheduled_cached_reqs: List[CachedRequestData]
+    scheduled_new_reqs: List[NewRequestData] # 调度后的请求。 
+    scheduled_cached_reqs: List[CachedRequestData] # 调度后的缓存请求。
 
-    num_scheduled_tokens: Dict[str, int]
-    total_num_scheduled_tokens: int
-    scheduled_encoder_inputs: Dict[str, List[int]]
-    num_common_prefix_blocks: int
+    num_scheduled_tokens: Dict[str, int] # 调度的token数量。
+    total_num_scheduled_tokens: int # 调度的总token数量。
+    scheduled_encoder_inputs: Dict[str, List[int]] # 调度的encoder输入。
+    num_common_prefix_blocks: int # 公共前缀块的数量。
 
-    finished_req_ids: Set[str]
-    free_encoder_input_ids: List[Tuple[str, int]]
+    finished_req_ids: Set[str] # 完成的请求id。
+    free_encoder_input_ids: List[Tuple[str, int]] # 释放的encoder输入id。

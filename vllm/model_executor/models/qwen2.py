@@ -98,7 +98,7 @@ class Qwen2MLP(nn.Module):
         return x
 
 
-class Qwen2Attention(nn.Module):
+class Qwen2Attention(nn.Module): # 注意力的具体实现。
 
     def __init__(self,
                  hidden_size: int,
@@ -133,7 +133,7 @@ class Qwen2Attention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
 
-        self.qkv_proj = QKVParallelLinear(
+        self.qkv_proj = QKVParallelLinear( 
             hidden_size,
             self.head_dim,
             self.total_num_heads,
@@ -142,7 +142,7 @@ class Qwen2Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
-        self.o_proj = RowParallelLinear(
+        self.o_proj = RowParallelLinear( 
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
@@ -150,7 +150,7 @@ class Qwen2Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self.rotary_emb = get_rope(
+        self.rotary_emb = get_rope( # RoPE
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position,
@@ -181,7 +181,7 @@ class Qwen2Attention(nn.Module):
         return output
 
 
-class Qwen2DecoderLayer(nn.Module):
+class Qwen2DecoderLayer(nn.Module): # 每一层的实现
 
     def __init__(
         self,
@@ -205,7 +205,7 @@ class Qwen2DecoderLayer(nn.Module):
         else:
             attn_type = AttentionType.ENCODER_ONLY
 
-        self.self_attn = Qwen2Attention(
+        self.self_attn = Qwen2Attention( # 自注意力
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
@@ -217,16 +217,16 @@ class Qwen2DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
         )
-        self.mlp = Qwen2MLP(
+        self.mlp = Qwen2MLP( # mlp
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size,
+        self.input_layernorm = RMSNorm(config.hidden_size, # 输入层归一化
+                                       eps=config.rms_norm_eps) 
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, # 输出层归一化
                                                 eps=config.rms_norm_eps)
 
     def forward(
@@ -337,13 +337,13 @@ class Qwen2Model(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.get_input_embeddings(input_ids) # 获取输入嵌入
             residual = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for i in range(self.start_layer, self.end_layer):
+        for i in range(self.start_layer, self.end_layer): # 便利每一层
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions,
@@ -444,7 +444,7 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config # 量化配置
-        lora_config = vllm_config.lora_config
+        lora_config = vllm_config.lora_config # lora配置
 
         self.config = config
         self.lora_config = lora_config
@@ -453,7 +453,7 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.model = Qwen2Model(vllm_config=vllm_config,
                                 prefix=maybe_prefix(prefix, "model"))
 
-        if get_pp_group().is_last_rank:
+        if get_pp_group().is_last_rank: # pipline模型，只在最后一个加载lm_head
             if config.tie_word_embeddings:
                 self.lm_head = self.model.embed_tokens
             else:
@@ -488,7 +488,7 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                    inputs_embeds)
         return hidden_states
 
-    def compute_logits(
+    def compute_logits( # 外部调用，计算logits
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
@@ -497,7 +497,7 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def sample(
+    def sample( # 采样。
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,

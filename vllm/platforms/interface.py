@@ -26,37 +26,37 @@ def in_wsl() -> bool:
 
 class _Backend(enum.Enum):
     FLASH_ATTN = enum.auto()
-    FLASH_ATTN_VLLM_V1 = enum.auto()
-    XFORMERS = enum.auto()
-    ROCM_FLASH = enum.auto()
-    TORCH_SDPA = enum.auto()
-    OPENVINO = enum.auto()
-    FLASHINFER = enum.auto()
-    TRITON_MLA = enum.auto()
-    HPU_ATTN = enum.auto()
-    PALLAS = enum.auto()
-    IPEX = enum.auto()
-    BLOCK_SPARSE_FLASH_ATTN = enum.auto()
-    NO_ATTENTION = enum.auto()
+    FLASH_ATTN_VLLM_V1 = enum.auto() # v1的实现
+    XFORMERS = enum.auto() # XFormers 是一个用于加速 Transformer 模型的组件框架，由 Facebook Research 开发。
+    ROCM_FLASH = enum.auto() # ROCM 架构的 FlashAttention 实现
+    TORCH_SDPA = enum.auto() # Torch 的 SDPA 实现
+    OPENVINO = enum.auto() # Intel 的优化工具包，用于加速深度学习推理
+    FLASHINFER = enum.auto() # FlashInfer 是一个用于优化 Transformer 模型的框架
+    TRITON_MLA = enum.auto() # Triton 是一个开源的编译器和编程框架
+    HPU_ATTN = enum.auto() # Habana Gaudi（HPU）平台优化的注意力机制实现
+    PALLAS = enum.auto() # Pallas 是一个用于优化 Transformer 模型的框架
+    IPEX = enum.auto() # Intel 的优化工具包，用于加速深度学习推理
+    BLOCK_SPARSE_FLASH_ATTN = enum.auto() # 块稀疏的 FlashAttention 实现
+    NO_ATTENTION = enum.auto() # 无注意力机制的占位符实现 
 
 
 class PlatformEnum(enum.Enum):
     CUDA = enum.auto()
-    ROCM = enum.auto()
-    TPU = enum.auto()
-    HPU = enum.auto()
-    XPU = enum.auto()
-    CPU = enum.auto()
-    NEURON = enum.auto()
-    OPENVINO = enum.auto()
-    OOT = enum.auto()
-    UNSPECIFIED = enum.auto()
+    ROCM = enum.auto() # AMD
+    TPU = enum.auto() # Google
+    HPU = enum.auto() # 
+    XPU = enum.auto() # 通用的计算平台名称
+    CPU = enum.auto() 
+    NEURON = enum.auto() #  Amazon 的 Inferentia 芯片
+    OPENVINO = enum.auto() #  Intel 提供的计算机视觉和深度学习推理优化工具包
+    OOT = enum.auto() 
+    UNSPECIFIED = enum.auto() # 未指定的平台
 
 
 class CpuArchEnum(enum.Enum):
     X86 = enum.auto()
     ARM = enum.auto()
-    POWERPC = enum.auto()
+    POWERPC = enum.auto() # RISC 架构，由 Apple、IBM 和 Motorola（现为 NXP）共同开发
     OTHER = enum.auto()
     UNKNOWN = enum.auto()
 

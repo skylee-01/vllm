@@ -610,7 +610,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 self.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
-                self.alibi_slopes,
+                self.alibi_slopes, 
                 layer._k_scale,
                 layer._v_scale,
             )
