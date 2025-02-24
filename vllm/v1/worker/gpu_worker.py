@@ -65,7 +65,7 @@ class Worker:
 
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
-        if envs.VLLM_TORCH_PROFILER_DIR:
+        if envs.VLLM_TORCH_PROFILER_DIR: # profile性能测试相关。
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)
@@ -80,11 +80,11 @@ class Worker:
         else:
             self.profiler = None
 
-    def sleep(self, level: int = 1) -> None:
-        free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
-        allocator = CuMemAllocator.get_instance()
-        allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
-        free_bytes_after_sleep, total = torch.cuda.mem_get_info()
+    def sleep(self, level: int = 1) -> None: # 释放GPU内存。
+        free_bytes_before_sleep = torch.cuda.mem_get_info()[0] # 释放前的GPU内存。
+        allocator = CuMemAllocator.get_instance() # 释放内存的工具
+        allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple()) # 释放内存。
+        free_bytes_after_sleep, total = torch.cuda.mem_get_info() # 释放后的GPU内存。
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
@@ -95,7 +95,7 @@ class Worker:
 
     def wake_up(self) -> None:
         allocator = CuMemAllocator.get_instance()
-        allocator.wake_up()
+        allocator.wake_up() # 唤醒？？？？
 
     def init_device(self):
         if self.device_config.device.type == "cuda":
@@ -119,17 +119,17 @@ class Worker:
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
-        # Initialize the distributed environment.
+        # Initialize the distributed environment. # 初始化分布式环境。
         init_worker_distributed_environment(self.parallel_config, self.rank,
                                             self.distributed_init_method,
                                             self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
-        # Construct the model runner
+        # Construct the model runner 构造模型运行器。
         self.model_runner = GPUModelRunner(self.vllm_config, self.device)
 
-    def load_model(self) -> None:
+    def load_model(self) -> None: # 加载模型
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CuMemAllocator.get_instance()
             assert allocator.get_current_usage() == 0, (
@@ -143,7 +143,7 @@ class Worker:
             self.model_runner.load_model()
 
     @torch.inference_mode()
-    def determine_available_memory(self) -> int:
+    def determine_available_memory(self) -> int: # 计算可用的显存。
         """Profiles the peak memory usage of the model to determine how much 
         memory can be used for KV cache without OOMs.
 
@@ -206,7 +206,7 @@ class Worker:
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
-    def compile_or_warm_up_model(self) -> None:
+    def compile_or_warm_up_model(self) -> None: # 编译、预热模型。
         # warm up sizes that are not in cudagraph capture sizes,
         # but users still want to compile for better performance,
         # e.g. for the max-num-batched token size in chunked prefill.
@@ -229,7 +229,7 @@ class Worker:
         return self.model_runner.get_model()
 
     @torch.inference_mode()
-    def execute_model(
+    def execute_model( # 执行一次推理
         self,
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
@@ -249,7 +249,7 @@ class Worker:
         return
 
 
-def init_worker_distributed_environment(
+def init_worker_distributed_environment( # 初始化分布式环境。
     parallel_config: ParallelConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
@@ -265,7 +265,7 @@ def init_worker_distributed_environment(
                                       parallel_config.pipeline_parallel_size)
 
 
-def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
+def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype): # 检查GPU是否支持指定的数据类型。
     # Check if the GPU supports the dtype.
     if torch_dtype == torch.bfloat16:  # noqa: SIM102
         if not current_platform.has_device_capability(80):

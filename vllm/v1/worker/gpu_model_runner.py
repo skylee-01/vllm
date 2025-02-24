@@ -396,7 +396,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # Equivalent to but faster than:
         # np.concatenate([np.arange(n) for n in num_scheduled_tokens])
-        # Step 1. [2, 5, 3] -> [2, 7, 10]
+        # Step 1. [2, 5, 3] -> [2, 7, 10] 
         cu_num_tokens = np.cumsum(num_scheduled_tokens)
         # Step 2. [2, 7, 10] -> [0, 0, 2, 2, 2, 2, 2, 7, 7, 7]
         cumsums_offsets = np.repeat(cu_num_tokens - num_scheduled_tokens,
@@ -784,7 +784,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             encoder_outputs = []
 
         # Prepare the decoder inputs.
-        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output) # 准备encoder的输入
+        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output) # 准备encoder的输入。
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens # 获取调度的token数量
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -837,7 +837,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sample_hidden_states = hidden_states[logits_indices] # 采样隐层状态
         logits = self.model.compute_logits(sample_hidden_states, None) # 计算logits
 
-        # Sample the next token and get logprobs if needed.
+        # Sample the next token and get logprobs if needed. # sample计算
         sampling_metadata = self._prepare_sampling(batch_changed)
         sampler_output = self.model.sample(
             logits=logits,

@@ -104,16 +104,16 @@ class KVCacheManager:
 
         # The block hashes for the request may already be computed
         # if the scheduler has tried to schedule the request before.
-        block_hashes = self.req_to_block_hashes[request.request_id]
-        if not block_hashes:
-            block_hashes = hash_request_tokens(self.block_size, request)
-            self.req_to_block_hashes[request.request_id] = block_hashes
+        block_hashes = self.req_to_block_hashes[request.request_id] # 获取块哈希。
+        if not block_hashes: # 如果没有块哈希，就计算块哈希。
+            block_hashes = hash_request_tokens(self.block_size, request) # 根据token数量，计算多少hash。
+            self.req_to_block_hashes[request.request_id] = block_hashes # 再存一下。
 
         for block_hash in block_hashes:
-            # block_hashes is a chain of block hashes. If a block hash is not
-            # in the cached_block_hash_to_id, the following block hashes are
+            # block_hashes is a chain of block hashes. If a block hash is not 
+            # in the cached_block_hash_to_id, the following block hashes are 
             # not computed yet for sure.
-            if cached_block := self._get_cached_block(block_hash):
+            if cached_block := self._get_cached_block(block_hash):  
                 computed_blocks.append(cached_block)
             else:
                 break

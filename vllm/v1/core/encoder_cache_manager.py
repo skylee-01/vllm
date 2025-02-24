@@ -15,16 +15,16 @@ logger = init_logger(__name__)
 class EncoderCacheManager:
 
     def __init__(self, cache_size: int):
-        self.cache_size = cache_size
-        self.num_free_slots = cache_size
+        self.cache_size = cache_size # 缓存大小
+        self.num_free_slots = cache_size # 空闲插槽
         # req_id -> cached input ids
-        self.cached: Dict[str, Set[int]] = {}
+        self.cached: Dict[str, Set[int]] = {} # req_id -> [input_id1, input_id2, ...]
         # List of [req_id, input_id]
-        self.freed: List[Tuple[str, int]] = []
+        self.freed: List[Tuple[str, int]] = [] 
 
     # 缓存是否存在
-    def has_cache(self, request: Request, input_id: int) -> bool:
-        req_id = request.request_id
+    def has_cache(self, request: Request, input_id: int) -> bool: 
+        req_id = request.request_id 
         return req_id in self.cached and input_id in self.cached[req_id]
 
     # 缓存能否分配
