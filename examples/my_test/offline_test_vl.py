@@ -17,10 +17,14 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 def main():
     # Create an LLM.
-    llm = LLM(model="/home/lisiqi/work/models/Qwen3-4B", 
+    # 尝试使用 Hugging Face 模型名称，或确保本地路径包含所有必需文件
+    llm = LLM(model="/home/lisiqi/work/models/Qwen2.5-VL-7B-Instruct-fp8",  # 或者使用完整的本地路径
                 enforce_eager=True,
-                max_model_len=100)
+                max_model_len=100,
+                # trust_remote_code=True,  # 添加此参数以支持自定义模型
+    )
     # Generate texts from the prompts.
+    
     # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
     outputs = llm.generate(prompts, sampling_params)
