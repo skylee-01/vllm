@@ -1911,10 +1911,12 @@ def setup_server(args):
 async def run_server(args, **uvicorn_kwargs) -> None:
     """Run a single-worker API server."""
 
-    # Add process-specific prefix to stdout and stderr.
+    # 为标准输出和标准错误添加进程特定的前缀，方便日志识别
     decorate_logs("APIServer")
 
+    # 设置服务器，包括监听地址和套接字
     listen_address, sock = setup_server(args)
+    # 运行服务器工作进程
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
 
 
@@ -1930,7 +1932,6 @@ async def run_server_worker(listen_address,
 
     server_index = client_config.get("client_index", 0) if client_config else 0
 
-    # Load logging config for uvicorn if specified
     log_config = load_log_config(args.log_config_file)
     if log_config is not None:
         uvicorn_kwargs['log_config'] = log_config
@@ -1950,39 +1951,41 @@ async def run_server_worker(listen_address,
         shutdown_task = await serve_http(
             app,
             sock=sock,
-            enable_ssl_refresh=args.enable_ssl_refresh,
-            host=args.host,
-            port=args.port,
-            log_level=args.uvicorn_log_level,
-            # NOTE: When the 'disable_uvicorn_access_log' value is True,
-            # no access log will be output.
+            enable_ssl_refresh=args.enable_ssl_refresh,  # 是否启用 SSL 证书自动刷新
+            host=args.host,                              # 监听主机地址
+            port=args.port,                              # 监听端口
+            log_level=args.uvicorn_log_level,            # Uvicorn 日志级别
+            # NOTE: 当 'disable_uvicorn_access_log' 为 True 时，不输出访问日志。
+            # 这个参数控制 Uvicorn 是否记录 HTTP 访问日志。
             access_log=not args.disable_uvicorn_access_log,
-            timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
-            ssl_keyfile=args.ssl_keyfile,
-            ssl_certfile=args.ssl_certfile,
-            ssl_ca_certs=args.ssl_ca_certs,
-            ssl_cert_reqs=args.ssl_cert_reqs,
-            h11_max_incomplete_event_size=args.h11_max_incomplete_event_size,
-            h11_max_header_count=args.h11_max_header_count,
-            **uvicorn_kwargs,
+            timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE, # 保持活动连接的超时时间
+            ssl_keyfile=args.ssl_keyfile,                # SSL 私钥文件路径
+            ssl_certfile=args.ssl_certfile,              # SSL 证书文件路径
+            ssl_ca_certs=args.ssl_ca_certs,              # SSL CA 证书文件路径
+            ssl_cert_reqs=args.ssl_cert_reqs,            # SSL 证书请求模式
+            h11_max_incomplete_event_size=args.h11_max_incomplete_event_size, # h11 (HTTP/1.1) 最大不完整事件大小
+            h11_max_header_count=args.h11_max_header_count, # h11 最大 HTTP 头数量
+            **uvicorn_kwargs,                            # 传递给 Uvicorn 的其他关键字参数
         )
 
-    # NB: Await server shutdown only after the backend context is exited
     try:
-        await shutdown_task
+        await shutdown_task  # 等待 HTTP 服务器正常关闭
     finally:
         sock.close()
 
 
 if __name__ == "__main__":
-    # NOTE(simon):
-    # This section should be in sync with vllm/entrypoints/cli/main.py for CLI
-    # entrypoints.
+    # 设置 CLI 环境
     cli_env_setup()
+    # 创建一个灵活的参数解析器
     parser = FlexibleArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server.")
+    # 添加命令行参数
     parser = make_arg_parser(parser)
+    # 解析命令行参数
     args = parser.parse_args()
+    # 验证解析后的服务器参数
     validate_parsed_serve_args(args)
 
+    # 使用 uvloop 运行服务器（异步事件循环库）
     uvloop.run(run_server(args))

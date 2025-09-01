@@ -101,12 +101,24 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
+    """
+    GPUModelRunner 负责在 GPU 上管理和执行模型的推理过程。
+    它处理请求调度、KV 缓存管理、注意力机制元数据准备、多模态输入处理、
+    推测解码以及模型前向传播等任务。
+    """
 
     def __init__(
         self,
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        """
+        初始化 GPUModelRunner 实例。
+
+        Args:
+            vllm_config: vLLM 的配置对象，包含模型、缓存、调度等方面的设置。
+            device: 模型运行所在的 PyTorch 设备（例如 cuda:0）。
+        """
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -353,6 +365,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                               torch.Tensor]] = None
 
     def _init_model_kwargs(self, num_tokens: int):
+        """
+        根据当前批次中的池化请求（pooling requests）初始化模型关键字参数。
+        主要用于处理 `token_type_ids` 等额外参数。
+        """
         model_kwargs = dict[str, Any]()
         num_reqs = self.input_batch.num_reqs
 
@@ -389,13 +405,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
-        Update the order of requests in the batch based on the attention
-        backend's needs. For example, some attention backends (namely MLA) may
-        want to separate requests based on if the attention computation will be
-        compute-bound or memory-bound.
-
-        Args:
-            scheduler_output: The scheduler output.
+        根据注意力后端的需求重新排序批处理中的请求。
+        例如，某些注意力后端（如 MLA）可能希望根据注意力计算是计算密集型还是内存密集型来分离请求。
         """
         # Attention free models have zero kv_cache_goups, however models
         # like Mamba are also attention free but use the kv_cache for
@@ -413,7 +424,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
-        """Initialize attributes from torch.cuda.get_device_properties
+        """
+        从 `torch.cuda.get_device_properties` 初始化设备属性，例如多处理器数量。
         """
         self.device_properties = torch.cuda.get_device_properties(self.device)
         self.num_sms = self.device_properties.multi_processor_count
@@ -423,14 +435,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         torch.cuda.synchronize()
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
-        """Update the cached states and the persistent batch with the scheduler
-        output.
-
-        The updated states are used by the `_prepare_inputs` function to create
-        the input GPU tensors for the model.
-
-        The SamplingMetadata is updated and copied to the GPU if there is a
-        new/resumed/paused/finished request in the batch.
+        """
+        使用调度器输出更新缓存状态和持久批处理。
+        更新后的状态用于 `_prepare_inputs` 函数创建模型的输入 GPU 张量。
+        如果批处理中有新的/恢复的/暂停的/完成的请求，则更新 `SamplingMetadata` 并将其复制到 GPU。
         """
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
@@ -638,6 +646,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> BatchedTensorInputs:
+        """
+        从调度器输出中提取多模态关键字参数。
+        如果支持多模态原始输入，则将所有模态的 kwargs 合并到一个 `BatchedTensorInputs` 中。
+        """
         if self.is_multimodal_raw_input_supported:  # noqa: SIM102
             if scheduler_output:
                 mm_kwargs = list[MultiModalKwargsItem]()
@@ -661,6 +673,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return {}
 
     def _dummy_mm_kwargs(self, num_seqs: int) -> BatchedTensorInputs:
+        """
+        为多模态模型生成虚拟的多模态关键字参数，用于分析和预编译。
+        """
         if self.is_multimodal_raw_input_supported:
             mm_budget = self.mm_budget
             assert mm_budget is not None
@@ -1275,6 +1290,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return self.model
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
+        """
+        获取模型支持的生成任务列表。
+        """
         model = self.get_model()
         supported_tasks = list[GenerationTask]()
 
@@ -1290,6 +1308,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return supported_tasks
 
     def get_supported_pooling_tasks(self) -> list[PoolingTask]:
+        """
+        获取模型支持的池化任务列表。
+        """
         model = self.get_model()
         if not is_pooling_model(model):
             return []
@@ -1308,6 +1329,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return supported_tasks
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        """
+        获取模型支持的所有任务的元组（包括生成和池化任务）。
+        """
         tasks = list[SupportedTask]()
 
         if self.model_config.runner_type == "generate":
@@ -1322,6 +1346,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         logits: torch.Tensor,
     ):
+        """
+        应用语法位掩码（grammar bitmask）到 logits 上，以强制结构化输出。
+        """
         grammar_bitmask = scheduler_output.grammar_bitmask
         if grammar_bitmask is None:
             return
@@ -1388,7 +1415,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def sync_and_slice_intermediate_tensors(
             self, num_tokens: int, intermediate_tensors: IntermediateTensors,
             sync_self: bool) -> IntermediateTensors:
-
+        """
+        同步并切片中间张量，主要用于管道并行（pipeline parallelism）中。
+        """
         assert self.intermediate_tensors is not None
 
         tp = self.vllm_config.parallel_config.tensor_parallel_size
@@ -1423,7 +1452,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                   is_dummy: bool = False,
                   is_profile: bool = False) -> None:
         """
-        Step for the EPLB (Expert Parallelism Load Balancing) state.
+        执行 EPLB（专家并行负载均衡）状态的步骤。
         """
         if not self.parallel_config.enable_eplb:
             return
@@ -1470,6 +1499,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_scheduled_tokens_np: np.ndarray,
         kv_connector_output: Optional[KVConnectorOutput],
     ) -> ModelRunnerOutput:
+        """
+        执行池化操作，将隐藏状态转换为池化输出。
+        """
         assert self.input_batch.num_reqs ==\
             len(self.input_batch.pooling_params), \
         "Either all or none of the requests in" \
@@ -1511,6 +1543,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
+        """
+        执行模型的前向传播，并根据调度器输出进行采样。
+
+        Args:
+            scheduler_output: 调度器输出，包含有关计划请求的信息。
+            intermediate_tensors: 中间张量，用于管道并行。
+
+        Returns:
+            Union[ModelRunnerOutput, IntermediateTensors]: 模型运行的输出，
+                                                         可能包含采样 token ID 和对数概率，
+                                                         或者中间张量（用于管道并行）。
+        """
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             if not has_kv_transfer_group():
@@ -1797,6 +1841,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        """
+        获取推测解码生成的草稿 token ID。
+        """
         if self._draft_token_ids is None:
             return None
         req_ids = self.input_batch.req_ids
@@ -1818,6 +1865,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         common_attn_metadata: CommonAttentionMetadata,
     ) -> Union[list[list[int]], torch.Tensor]:
+        """
+        根据推测解码方法（N-gram、Medusa 或 Eagle）提出草稿 token ID。
+        """
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.speculative_config.method == "ngram":
             assert isinstance(self.drafter, NgramProposer)
@@ -1917,6 +1967,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         sampled_token_ids: list[list[int]],
     ) -> list[list[int]]:
+        """
+        根据 N-gram 推测解码方法提出草稿 token ID。
+        """
         # TODO(woosuk): Optimize.
         req_ids = self.input_batch.req_ids
         draft_token_ids: list[list[int]] = []
@@ -1949,6 +2002,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return draft_token_ids
 
     def update_config(self, overrides: dict[str, Any]) -> None:
+        """
+        更新模型的配置。目前支持 `load_config` 和 `model_config`。
+        """
         allowed_config_names = {"load_config", "model_config"}
         for config_name, config_overrides in overrides.items():
             assert config_name in allowed_config_names, \
@@ -1960,8 +2016,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def load_model(self, eep_scale_up: bool = False) -> None:
         """
+        加载模型到 GPU。
+
         Args:
-            eep_scale_up: the model loading is for elastic EP scale up.
+            eep_scale_up: 模型加载是否用于弹性 EP 扩展。
         """
         logger.info("Starting to load model %s...", self.model_config.model)
         if eep_scale_up:
@@ -2056,6 +2114,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                           runtime_mode=CUDAGraphMode.FULL)
 
     def reload_weights(self) -> None:
+        """
+        重新加载模型权重（原地）。
+        """
         assert getattr(self, "model", None) is not None, \
             "Cannot reload weights before model is loaded."
         model_loader = get_model_loader(self.load_config)
@@ -2067,6 +2128,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         tensorizer_config: "TensorizerConfig",
     ) -> None:
+        """
+        保存张量化模型（tensorized model）。
+        """
         model = self.get_model()
         TensorizerLoader.save_model(
             model,
@@ -2079,6 +2143,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         hidden_states: torch.Tensor,
         num_scheduled_tokens: dict[str, int],
     ) -> dict[str, Optional[LogprobsTensors]]:
+        """
+        获取 prompt 的对数概率字典。
+        """
         num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
         if not num_prompt_logprobs_dict:
             return {}
@@ -2172,6 +2239,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         logits: Optional[torch.Tensor],
     ) -> dict[str, int]:
+        """
+        计算 logits 中的 NaN 数量。
+        """
         try:
             if logits is None:
                 return {req_id: 0 for req_id in self.input_batch.req_ids}
@@ -2191,10 +2261,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     @contextmanager
     def maybe_randomize_inputs(self, input_ids: torch.Tensor):
         """
-        Randomize input_ids if VLLM_RANDOMIZE_DP_DUMMY_INPUTS is set.
-        This is to help balance expert-selection
-         - during profile_run
-         - during DP rank dummy run
+        如果设置了 `VLLM_RANDOMIZE_DP_DUMMY_INPUTS`，则随机化 `input_ids`。
+        这有助于在 `profile_run` 和 DP rank 虚拟运行时平衡专家选择。
         """
         dp_size = self.vllm_config.parallel_config.data_parallel_size
         randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and dp_size > 1
@@ -2222,7 +2290,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         modality: str,
         max_items_per_batch: int,
     ) -> BatchedTensorInputs:
-        """Dummy data for profiling and precompiling multimodal models."""
+        """
+        为多模态模型生成虚拟批处理数据，用于性能分析和预编译。
+        """
         dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
             model_config=self.model_config,
             seq_len=self.max_num_tokens,
@@ -2252,21 +2322,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         is_profile: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Run a dummy forward pass to warm up/profile run or capture the
-        CUDA graph for the model.
+        运行一个虚拟前向传递，用于模型预热/性能分析或捕获模型的 CUDA 图。
 
         Args:
-            num_tokens: Number of tokens to run the dummy forward pass.
-            cudagraph_runtime_mode: used to control the behavior.
-                - CUDAGraphMode.NONE: No cudagraph, for warm up and profile run
-                - CUDAGraphMode.PIECEWISE: Piecewise cudagraph.
-                - CUDAGraphMode.FULL: Full cudagraph, attention metadata is
-                    needed.
-            force_attention: If True, always create attention metadata. Used to 
-                warm up attention backend when mode is NONE.
-            uniform_decode: If True, the batch is a uniform decode batch.
-            skip_eplb: If True, skip EPLB state update.
-            is_profile: If True, this is a profile run.
+            num_tokens: 运行虚拟前向传递的 token 数量。
+            cudagraph_runtime_mode: 用于控制行为。
+                - CUDAGraphMode.NONE: 无 cudagraph，用于预热和性能分析运行
+                - CUDAGraphMode.PIECEWISE: 分段 cudagraph。
+                - CUDAGraphMode.FULL: 完整的 cudagraph，需要注意力元数据。
+            force_attention: 如果为 True，则总是创建注意力元数据。在模式为 NONE 时用于预热注意力后端。
+            uniform_decode: 如果为 True，则批处理是均匀解码批处理。
+            skip_eplb: 如果为 True，则跳过 EPLB 状态更新。
+            is_profile: 如果为 True，则这是一个性能分析运行。
         """
         assert cudagraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
@@ -2439,6 +2506,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        """
+        运行一个虚拟采样器，用于预热采样器。
+        """
         # The dummy hidden states may contain special values,
         # like `inf` or `nan`.
         # To avoid breaking the sampler, we use a random tensor here instead.
@@ -2509,11 +2579,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
         return sampler_output
 
+    @torch.inference_mode()
     def _dummy_pooler_run_task(
         self,
         hidden_states: torch.Tensor,
         task: PoolingTask,
     ) -> PoolerOutput:
+        """
+        运行一个虚拟池化任务。
+        """
         num_tokens = hidden_states.shape[0]
         max_num_reqs = self.scheduler_config.max_num_seqs
         num_reqs = min(num_tokens, max_num_reqs)
@@ -2564,6 +2638,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         hidden_states: torch.Tensor,
     ) -> PoolerOutput:
+        """
+        运行一个虚拟池化器，用于预热池化器。
+        """
         # Find the task that has the largest output for subsequent steps
         output_size = dict[PoolingTask, float]()
         for task in self.get_supported_pooling_tasks():
@@ -2576,6 +2653,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return self._dummy_pooler_run_task(hidden_states, max_task)
 
     def profile_run(self) -> None:
+        """
+        执行模型性能分析运行，包括多模态编码器和编码器缓存的性能分析。
+        """
         # Profile with multimodal encoder & encoder cache.
         if self.supports_mm_inputs:
             if self.model_config.multimodal_config.skip_mm_profiling:
@@ -2867,6 +2947,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.is_encoder_only_model = True
 
     def initialize_cudagraph_capture(self) -> None:
+        """
+        初始化 CUDA 图捕获。\n        根据注意力后端支持情况调整 CUDA 图模式。\n        """
         min_cg_support = AttentionCGSupport.ALWAYS
         min_cg_builder_name = None
 
@@ -2937,9 +3019,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def calculate_reorder_batch_threshold(self) -> None:
         """
-        Check that if any backends reorder batches; that the reordering
-        is compatible (e.g., decode threshold is the same)
-        """
+        计算重新排序批处理的阈值。\n        检查注意力后端是否需要重新排序批处理，并确保它们兼容。\n        """
         for group in self._attn_group_iterator():
             attn_metadata_builder_i = group.metadata_builder
 
@@ -3020,7 +3100,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _attn_group_iterator(self) -> Iterator[AttentionGroup]:
         return itertools.chain.from_iterable(self.attn_groups)
-
+        
     def _kv_cache_spec_attn_group_iterator(
             self) -> Iterator[tuple[KVCacheSpec, AttentionGroup]]:
         if not self.kv_cache_config.kv_cache_groups:
@@ -3361,3 +3441,4 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 group_metadata[layer_name] = (common_metadata, metadata)
 
         return group_metadata
+

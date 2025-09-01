@@ -1,5 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# ============================================================================
+# vLLM V1 引擎核心模块
+# 这个文件是 vLLM V1 引擎的核心实现，包含了引擎的主要逻辑：
+# 1. EngineCore - 引擎的内部循环和核心逻辑
+# 2. EngineCoreProc - 在后台进程中运行 EngineCore 的 ZMQ 包装器
+# 3. DPEngineCoreProc - 支持数据并行的引擎核心进程
+# 4. DPEngineCoreActor - 在 Ray 环境中运行的数据并行引擎核心
+# ============================================================================
+
 import os
 import queue
 import signal
@@ -51,141 +61,192 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
+# 轮询超时时间（秒）- 用于 ZMQ 套接字轮询
 POLLING_TIMEOUT_S = 2.5
+# 握手超时时间（分钟）- 引擎与前端进程握手的最大等待时间
 HANDSHAKE_TIMEOUT_MINS = 5
 
+# 泛型类型变量，用于 collective_rpc 方法的返回类型
 _R = TypeVar('_R')  # Return type for collective_rpc
 
 
 class EngineCore:
-    """Inner loop of vLLM's Engine."""
+    """
+    vLLM 引擎的内部循环核心类
+    
+    这是 vLLM V1 引擎的核心组件，负责：
+    1. 初始化模型执行器、调度器、KV 缓存等组件
+    2. 处理请求的添加、中止等操作
+    3. 执行模型推理的核心循环（调度 -> 执行 -> 输出）
+    4. 管理批处理队列以支持流水线并行
+    5. 处理多模态输入缓存和结构化输出
+    """
 
     def __init__(self,
-                 vllm_config: VllmConfig,
-                 executor_class: type[Executor],
-                 log_stats: bool,
-                 executor_fail_callback: Optional[Callable] = None):
+                 vllm_config: VllmConfig,        # vLLM 配置对象，包含所有配置信息
+                 executor_class: type[Executor], # 执行器类，负责实际的模型推理
+                 log_stats: bool,                # 是否记录统计信息
+                 executor_fail_callback: Optional[Callable] = None):  # 执行器失败时的回调函数
 
-        # plugins need to be loaded at the engine/scheduler level too
+        # 在引擎/调度器级别也需要加载插件
+        # 插件系统允许用户扩展 vLLM 的功能
         from vllm.plugins import load_general_plugins
         load_general_plugins()
 
         self.vllm_config = vllm_config
-        logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
+        logger.info("正在初始化 V1 LLM 引擎 (v%s)，配置: %s",
                     VLLM_VERSION, vllm_config)
 
-        self.log_stats = log_stats
+        self.log_stats = log_stats  # 保存是否记录统计信息的标志
 
-        # Setup Model.
+        # 设置模型执行器
+        # 执行器负责实际的模型推理，包括前向传播、张量操作等
         self.model_executor = executor_class(vllm_config)
         if executor_fail_callback is not None:
+            # 注册执行器失败时的回调函数，用于错误处理
             self.model_executor.register_failure_callback(
                 executor_fail_callback)
 
+        # 可用于 KV 缓存的 GPU 内存大小（字节），-1 表示尚未初始化
         self.available_gpu_memory_for_kv_cache = -1
 
-        # Setup KV Caches and update CacheConfig after profiling.
+        # 设置 KV 缓存并在性能分析后更新缓存配置
+        # KV 缓存用于存储注意力机制中的键值对，是 Transformer 模型推理的关键组件
         num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
             self._initialize_kv_caches(vllm_config)
 
-        vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
-        vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
+        # 更新配置中的缓存块数量
+        vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks  # GPU 上的缓存块数
+        vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks  # CPU 上的缓存块数
+        # 通过集体 RPC 调用在所有工作进程中初始化缓存
         self.collective_rpc("initialize_cache",
                             args=(num_gpu_blocks, num_cpu_blocks))
 
+        # 结构化输出管理器
+        # 负责处理结构化输出（如 JSON schema 约束的输出）
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
-        # Setup scheduler.
+        # 设置调度器
+        # 调度器负责决定哪些请求应该被处理，如何分配资源等
         if isinstance(vllm_config.scheduler_config.scheduler_cls, str):
+            # 如果调度器类以字符串形式提供，则通过限定名解析获取实际的类
             Scheduler = resolve_obj_by_qualname(
                 vllm_config.scheduler_config.scheduler_cls)
         else:
+            # 直接使用提供的调度器类
             Scheduler = vllm_config.scheduler_config.scheduler_cls
 
-        # This warning can be removed once the V1 Scheduler interface is
-        # finalized and we can maintain support for scheduler classes that
-        # implement it
+        # 这个警告可以在 V1 调度器接口最终确定后移除
+        # 届时我们可以维持对实现该接口的调度器类的支持
         if Scheduler is not V1Scheduler:
             logger.warning(
-                "Using configured V1 scheduler class %s. "
-                "This scheduler interface is not public and "
-                "compatibility may not be maintained.",
+                "使用配置的 V1 调度器类 %s。"
+                "此调度器接口不是公共接口，"
+                "兼容性可能无法保证。",
                 vllm_config.scheduler_config.scheduler_cls)
 
         if len(kv_cache_config.kv_cache_groups) == 0:
-            # Encoder models without KV cache don't support
-            # chunked prefill. But do SSM models?
-            logger.info("Disabling chunked prefill for model without KVCache")
+            # 没有 KV 缓存的编码器模型不支持分块预填充
+            # 但是 SSM（状态空间模型）模型呢？
+            logger.info("为没有 KV 缓存的模型禁用分块预填充")
             vllm_config.scheduler_config.chunked_prefill_enabled = False
 
+        # 创建调度器实例
         self.scheduler: SchedulerInterface = Scheduler(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
             structured_output_manager=self.structured_output_manager,
-            include_finished_set=vllm_config.parallel_config.data_parallel_size
-            > 1,
+            # 只有在数据并行大小 > 1 时才包含完成集合，用于跨进程同步
+            include_finished_set=vllm_config.parallel_config.data_parallel_size > 1,
             log_stats=self.log_stats,
         )
+        # 检查是否启用推测解码（speculative decoding）
         self.use_spec_decode = vllm_config.speculative_config is not None
 
+        # 多模态输入缓存服务器
+        # 用于缓存和管理多模态输入（如图像、音频等），避免重复处理
         self.mm_input_cache_server = MultiModalInputCacheServer(
             vllm_config.model_config, MULTIMODAL_REGISTRY)
 
-        # Setup batch queue for pipeline parallelism.
-        # Batch queue for scheduled batches. This enables us to asynchronously
-        # schedule and execute batches, and is required by pipeline parallelism
-        # to eliminate pipeline bubbles.
+        # 为流水线并行设置批处理队列
+        # 已调度批次的批处理队列。这使我们能够异步调度和执行批次，
+        # 这是流水线并行消除流水线气泡所必需的。
         self.batch_queue_size = self.model_executor.max_concurrent_batches
+        # 批处理队列：存储 (Future[ModelRunnerOutput], SchedulerOutput) 元组
         self.batch_queue: Optional[queue.Queue[tuple[Future[ModelRunnerOutput],
                                                      SchedulerOutput]]] = None
         if self.batch_queue_size > 1:
-            logger.info("Batch queue is enabled with size %d",
+            logger.info("批处理队列已启用，大小为 %d",
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
 
+        # 请求块哈希器：用于前缀缓存的哈希函数
         self.request_block_hasher: Optional[Callable[[Request],
                                                      list[BlockHash]]] = None
+        # 如果启用了前缀缓存或存在 KV 连接器，则初始化块哈希器
         if (self.vllm_config.cache_config.enable_prefix_caching
                 or self.scheduler.get_kv_connector() is not None):
 
-            block_size = vllm_config.cache_config.block_size
+            block_size = vllm_config.cache_config.block_size  # 缓存块大小
+            # 根据配置的哈希算法名称获取哈希函数
             caching_hash_fn = get_hash_fn_by_name(
                 vllm_config.cache_config.prefix_caching_hash_algo)
+            # 初始化空哈希值
             init_none_hash(caching_hash_fn)
 
+            # 创建请求块哈希器，用于计算请求的块哈希值
             self.request_block_hasher = get_request_block_hasher(
                 block_size, caching_hash_fn)
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
+        """
+        初始化 KV 缓存系统
+        
+        这个方法负责：
+        1. 获取模型所需的 KV 缓存规格
+        2. 分析可用的 GPU 内存
+        3. 计算可以分配多少个缓存块
+        4. 统一所有工作进程的缓存配置
+        5. 初始化模型执行器的缓存系统
+        
+        返回：
+            tuple[int, int, KVCacheConfig]: (GPU块数, CPU块数, KV缓存配置)
+        """
         start = time.time()
 
-        # Get all kv cache needed by the model
+        # 获取模型所需的所有 KV 缓存规格
+        # 不同的模型层可能需要不同的缓存配置
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
 
+        # 检查模型是否需要 KV 缓存（某些编码器模型不需要）
         has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
         if has_kv_cache:
+            # 检查是否在弹性端点扩容启动模式下
             if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1":
+                # 在扩容模式下，从数据并行组同步 KV 缓存内存大小
                 dp_group = getattr(self, "dp_group", None)
                 assert dp_group is not None
                 self.available_gpu_memory_for_kv_cache = \
                     ParallelConfig.sync_kv_cache_memory_size(dp_group, -1)
+                # 为所有工作进程使用相同的可用内存大小
                 available_gpu_memory = [
                     self.available_gpu_memory_for_kv_cache
                 ] * len(kv_cache_specs)
             else:
-                # Profiles the peak memory usage of the model to determine how
-                # much memory can be allocated for kv cache.
+                # 分析模型的峰值内存使用情况，以确定有多少内存可以分配给 KV 缓存
+                # 这个过程通过运行模型的前向传播来测量内存使用情况
                 available_gpu_memory = (
                     self.model_executor.determine_available_memory())
                 self.available_gpu_memory_for_kv_cache = \
                     available_gpu_memory[0]
         else:
-            # Attention free models don't need memory for kv cache
+            # 无注意力机制的模型不需要 KV 缓存内存
             available_gpu_memory = [0] * len(kv_cache_specs)
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
-        # Get the kv cache tensor size
+        # 计算 KV 缓存张量大小
+        # 为每个工作进程生成 KV 缓存配置
         kv_cache_configs = [
             get_kv_cache_config(vllm_config, kv_cache_spec_one_worker,
                                 available_gpu_memory_one_worker)
@@ -193,66 +254,88 @@ class EngineCore:
             zip(kv_cache_specs, available_gpu_memory)
         ]
 
-        # Since we use a shared centralized controller, we need the
-        # `kv_cache_config` to be consistent across all workers to make sure
-        # all the memory operators can be applied to all workers.
+        # 由于我们使用共享的集中式控制器，我们需要 `kv_cache_config` 在所有工作进程中保持一致
+        # 以确保所有内存操作都可以应用于所有工作进程
         unify_kv_cache_configs(kv_cache_configs)
 
-        # All workers have the same kv_cache_config except layer names, so use
-        # an arbitrary one to initialize the scheduler.
+        # 所有工作进程的 kv_cache_config 都相同（除了层名称），因此使用任意一个来初始化调度器
         assert all([
             cfg.num_blocks == kv_cache_configs[0].num_blocks
             for cfg in kv_cache_configs
         ])
-        num_gpu_blocks = kv_cache_configs[0].num_blocks
-        num_cpu_blocks = 0
-        scheduler_kv_cache_config = kv_cache_configs[0]
+        num_gpu_blocks = kv_cache_configs[0].num_blocks  # GPU 上的缓存块数量
+        num_cpu_blocks = 0  # CPU 缓存块数量（V1 引擎中暂时设为 0）
+        scheduler_kv_cache_config = kv_cache_configs[0]  # 调度器使用的缓存配置
 
-        # Initialize kv cache and warmup the execution
+        # 初始化 KV 缓存并预热执行
+        # 这会在所有工作进程中创建实际的缓存张量并进行预热运行
         self.model_executor.initialize_from_config(kv_cache_configs)
 
         elapsed = time.time() - start
-        logger.info(("init engine (profile, create kv cache, "
-                     "warmup model) took %.2f seconds"), elapsed)
+        logger.info(("初始化引擎（性能分析、创建 KV 缓存、预热模型）耗时 %.2f 秒"), elapsed)
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        """
+        获取模型支持的任务类型
+        
+        返回：
+            tuple[SupportedTask, ...]: 支持的任务类型元组，如生成、分类、嵌入等
+        """
         return self.model_executor.supported_tasks
 
     def add_request(self, request: Request, request_wave: int = 0):
-        """Add request to the scheduler.
-        
-        `request_wave`: indicate which wave of requests this is expected to
-        belong to in DP case
         """
-        # Validate the request_id type.
+        将请求添加到调度器中
+        
+        这个方法执行以下操作：
+        1. 验证请求 ID 的类型
+        2. 检查池化参数的有效性（如果有）
+        3. 处理 KV 传输参数
+        4. 将请求添加到调度器
+        
+        参数：
+            request (Request): 要添加的请求对象
+            request_wave (int): 在数据并行情况下，指示此请求预期属于哪一波请求
+        """
+        # 验证请求 ID 的类型
+        # 请求 ID 必须是字符串类型，用于唯一标识每个请求
         if not isinstance(request.request_id, str):
             raise TypeError(
-                f"request_id must be a string, got {type(request.request_id)}")
+                f"请求 ID 必须是字符串类型，得到 {type(request.request_id)}")
 
+        # 如果请求包含池化参数，验证任务类型是否受支持
         if pooling_params := request.pooling_params:
+            # 获取模型支持的池化任务类型
             supported_pooling_tasks = [
                 task for task in self.get_supported_tasks()
                 if task in POOLING_TASKS
             ]
 
+            # 检查请求的池化任务是否在支持的任务列表中
             if pooling_params.task not in supported_pooling_tasks:
-                raise ValueError(f"Unsupported task: {pooling_params.task!r} "
-                                 f"Supported tasks: {supported_pooling_tasks}")
+                raise ValueError(f"不支持的任务: {pooling_params.task!r} "
+                                 f"支持的任务: {supported_pooling_tasks}")
 
+        # 检查 KV 传输参数的有效性
         if request.kv_transfer_params is not None and (
                 not self.scheduler.get_kv_connector()):
-            logger.warning("Got kv_transfer_params, but no KVConnector found. "
-                           "Disabling KVTransfer for this request.")
+            logger.warning("收到 kv_transfer_params，但未找到 KVConnector。"
+                           "为此请求禁用 KV 传输。")
 
+        # 将请求添加到调度器中进行处理
         self.scheduler.add_request(request)
 
     def abort_requests(self, request_ids: list[str]):
-        """Abort requests from the scheduler."""
+        """
+        从调度器中中止指定的请求
+        
+        参数：
+            request_ids (list[str]): 要中止的请求 ID 列表
+        """
 
-        # TODO: The scheduler doesn't really need to know the
-        # specific finish reason, TBD whether we propagate that
-        # (i.e. client-aborted vs stop criteria met).
+        # TODO: 调度器实际上不需要知道具体的完成原因
+        # 待定是否传播该信息（即客户端中止 vs 满足停止条件）
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
@@ -261,142 +344,283 @@ class EngineCore:
         model_fn: Callable[[SchedulerOutput], ModelRunnerOutput],
         scheduler_output: SchedulerOutput,
     ) -> ModelRunnerOutput:
-        """Execute the model and log detailed info on failure."""
+        """
+        执行模型并在失败时记录详细信息
+        
+        这个方法包装了模型执行调用，并在发生异常时记录详细的调试信息。
+        这对于排查模型执行问题非常有用。
+        
+        参数：
+            model_fn: 模型执行函数，接收 SchedulerOutput 并返回 ModelRunnerOutput
+            scheduler_output: 调度器输出，包含要执行的批次信息
+            
+        返回：
+            ModelRunnerOutput: 模型执行结果
+        """
         try:
             return model_fn(scheduler_output)
         except Exception as err:
-            # We do not want to catch BaseException here since we're only
-            # interested in dumping info when the exception is due to an
-            # error from execute_model itself.
+            # 我们不想在这里捕获 BaseException，因为我们只对
+            # 由 execute_model 本身的错误引起的异常时转储信息感兴趣
 
-            # NOTE: This method is exception-free
+            # 注意：这个方法是无异常的
             dump_engine_exception(self.vllm_config, scheduler_output,
                                   self.scheduler.make_stats())
             raise err
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
-        """Schedule, execute, and make output.
-
-        Returns tuple of outputs and a flag indicating whether the model
-        was executed.
+        """
+        执行一次引擎步骤：调度、执行和生成输出
+        
+        这是引擎的核心循环，包含三个主要步骤：
+        1. 调度：决定哪些请求应该被处理
+        2. 执行：运行模型推理
+        3. 输出：更新调度器状态并生成输出
+        
+        返回：
+            tuple[dict[int, EngineCoreOutputs], bool]: 
+                - 第一个元素是输出字典，键为客户端索引，值为引擎输出
+                - 第二个元素是标志，指示模型是否被执行
         """
 
-        # Check for any requests remaining in the scheduler - unfinished,
-        # or finished and not yet removed from the batch.
+        # 检查调度器中是否还有剩余请求 - 未完成的或已完成但尚未从批次中移除的
         if not self.scheduler.has_requests():
-            return {}, False
+            return {}, False  # 没有请求时返回空结果
+        
+        # 第一步：调度 - 决定哪些请求应该被处理
         scheduler_output = self.scheduler.schedule()
+        
+        # 第二步：执行 - 运行模型推理
         model_output = self.execute_model_with_error_logging(
             self.model_executor.execute_model,  # type: ignore
             scheduler_output)
+        
+        # 第三步：更新 - 根据模型输出更新调度器状态并生成输出
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output)  # type: ignore
 
         return (engine_core_outputs,
-                scheduler_output.total_num_scheduled_tokens > 0)
+                scheduler_output.total_num_scheduled_tokens > 0)  # 返回输出和模型执行标志
 
     def post_step(self, model_executed: bool) -> None:
+        """
+        步骤后处理，主要用于推测解码
+        
+        在模型执行后调用，处理推测解码相关的后续操作。
+        推测解码是一种加速技术，通过并行生成多个候选令牌来提高生成速度。
+        
+        参数：
+            model_executed (bool): 模型是否被执行的标志
+        """
         if self.use_spec_decode and model_executed:
-            # Take the draft token ids.
+            # 获取草稿令牌 ID
+            # 在推测解码中，草稿模型生成多个候选令牌，然后由主模型验证
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
+                # 更新调度器中的草稿令牌 ID
                 self.scheduler.update_draft_token_ids(draft_token_ids)
 
     def step_with_batch_queue(
             self) -> tuple[Optional[dict[int, EngineCoreOutputs]], bool]:
-        """Schedule and execute batches with the batch queue.
-        Note that if nothing to output in this step, None is returned.
-
-        The execution flow is as follows:
-        1. Try to schedule a new batch if the batch queue is not full.
-        If a new batch is scheduled, directly return an empty engine core
-        output. In other words, fulfilling the batch queue has a higher priority
-        than getting model outputs.
-        2. If there is no new scheduled batch, meaning that the batch queue
-        is full or no other requests can be scheduled, we block until the first
-        batch in the job queue is finished.
-        3. Update the scheduler from the output.
+        """
+        使用批处理队列调度和执行批次
+        
+        注意：如果此步骤中没有输出，则返回 None。
+        
+        执行流程如下：
+        1. 如果批处理队列未满，尝试调度新批次。
+           如果调度了新批次，直接返回空的引擎核心输出。
+           换句话说，填充批处理队列比获取模型输出具有更高的优先级。
+        2. 如果没有新的已调度批次，意味着批处理队列已满或没有其他请求可以调度，
+           我们阻塞直到作业队列中的第一个批次完成。
+        3. 根据输出更新调度器。
+        
+        返回：
+            tuple[Optional[dict[int, EngineCoreOutputs]], bool]: 
+                - 第一个元素是输出字典（可能为 None）
+                - 第二个元素是标志，指示是否调度了新批次
         """
         assert self.batch_queue is not None
 
         engine_core_outputs = None
         scheduler_output = None
-        # Try to schedule a new batch if the batch queue is not full, but
-        # the scheduler may return an empty batch if all requests are scheduled.
-        # Note that this is not blocking.
+        # 如果批处理队列未满，尝试调度新批次，但如果所有请求都已调度，
+        # 调度器可能返回空批次。
+        # 注意这不是阻塞的。
         if not self.batch_queue.full():
             scheduler_output = self.scheduler.schedule()
             if scheduler_output.total_num_scheduled_tokens > 0:
+                # 异步执行模型，返回 Future 对象
                 future = self.model_executor.execute_model(scheduler_output)
+                # 将 Future 和调度器输出放入批处理队列
                 self.batch_queue.put_nowait(
                     (future, scheduler_output))  # type: ignore
 
+        # 检查是否成功调度了新批次
         scheduled_batch = (scheduler_output is not None
                            and scheduler_output.total_num_scheduled_tokens > 0)
 
-        # If no more requests can be scheduled and the job queue is not empty,
-        # block until the first batch in the job queue is finished.
-        # TODO(comaniac): Ideally we should peek the first batch in the
-        # job queue to check if it's finished before scheduling a new batch,
-        # but peeking the first element in a queue is not thread-safe,
-        # so we need more work.
+        # 如果没有更多请求可以调度且作业队列不为空，
+        # 阻塞直到作业队列中的第一个批次完成。
+        # TODO(comaniac): 理想情况下，我们应该在调度新批次之前稥视作业队列中的第一个批次
+        # 以检查它是否已完成，但稥视队列中的第一个元素不是线程安全的，
+        # 所以我们需要做更多工作。
         if not scheduled_batch and not self.batch_queue.empty():
+            # 从队列中获取第一个作业
             future, scheduler_output = self.batch_queue.get_nowait()
 
-            # Blocking until the first result is available.
+            # 阻塞直到第一个结果可用
             model_output = self.execute_model_with_error_logging(
                 lambda _: future.result(), scheduler_output)
 
+            # 标记任务完成
             self.batch_queue.task_done()
+            # 根据模型输出更新调度器并生成引擎输出
             engine_core_outputs = (self.scheduler.update_from_output(
                 scheduler_output, model_output))
 
         return engine_core_outputs, scheduled_batch
 
     def shutdown(self):
+        """
+        关闭引擎核心，清理所有资源
+        
+        这个方法会按顺序关闭所有组件：
+        1. 结构化输出管理器
+        2. 模型执行器
+        3. 调度器
+        """
+        # 清理结构化输出管理器的后端
         self.structured_output_manager.clear_backend()
+        # 关闭模型执行器
         if self.model_executor:
             self.model_executor.shutdown()
+        # 关闭调度器
         if self.scheduler:
             self.scheduler.shutdown()
 
     def profile(self, is_start: bool = True):
+        """
+        启动或停止性能分析
+        
+        参数：
+            is_start (bool): True 表示开始分析，False 表示停止分析
+        """
         self.model_executor.profile(is_start)
 
     def reset_mm_cache(self):
-        # NOTE: Since this is mainly for debugging, we don't attempt to
-        # re-sync the internal caches (P0 processor, P0 mirror, P1 mirror)
+        """
+        重置多模态输入缓存
+        
+        注意：由于这主要用于调试，我们不尝试重新同步内部缓存
+        （P0 处理器、P0 镜像、P1 镜像）
+        """
         if self.scheduler.has_unfinished_requests():
-            logger.warning("Resetting the multi-modal cache when requests are "
-                           "in progress may lead to desynced internal caches.")
+            logger.warning("在请求正在进行时重置多模态缓存"
+                           "可能导致内部缓存去同步。")
 
+        # 重置多模态输入缓存服务器
         self.mm_input_cache_server.reset()
 
     def reset_prefix_cache(self):
+        """
+        重置前缀缓存
+        
+        前缀缓存用于存储常见的请求前缀，以加速具有相同前缀的请求处理。
+        """
         self.scheduler.reset_prefix_cache()
 
     def sleep(self, level: int = 1):
+        """
+        让模型执行器进入睡眠模式
+        
+        睡眠模式用于节省资源，在没有请求时减少 GPU 使用。
+        
+        参数：
+            level (int): 睡眠级别，数值越高节省资源越多
+        """
         self.model_executor.sleep(level)
 
     def wake_up(self, tags: Optional[list[str]] = None):
+        """
+        唤醒模型执行器
+        
+        从睡眠模式中唤醒模型执行器，使其能够处理新请求。
+        
+        参数：
+            tags (Optional[list[str]]): 可选的标签列表，用于指定唤醒特定组件
+        """
         self.model_executor.wake_up(tags)
 
     def is_sleeping(self) -> bool:
+        """
+        检查模型执行器是否在睡眠模式
+        
+        返回：
+            bool: True 表示正在睡眠，False 表示正在活动
+        """
         return self.model_executor.is_sleeping
 
     def execute_dummy_batch(self):
+        """
+        执行虚拟批次
+        
+        在数据并行情况下，当没有实际请求需要处理但需要保持同步时，
+        执行一个空的模型前向传播以保持所有进程的同步。
+        """
         self.model_executor.collective_rpc("execute_dummy_batch")
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
+        """
+        添加 LoRA 适配器
+        
+        LoRA (Low-Rank Adaptation) 是一种参数高效的微调方法，
+        允许在不修改原始模型参数的情况下适配新任务。
+        
+        参数：
+            lora_request (LoRARequest): LoRA 请求对象，包含适配器的配置信息
+            
+        返回：
+            bool: 是否成功添加 LoRA 适配器
+        """
         return self.model_executor.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
+        """
+        移除 LoRA 适配器
+        
+        从模型中移除指定的 LoRA 适配器，释放相关资源。
+        
+        参数：
+            lora_id (int): 要移除的 LoRA 适配器 ID
+            
+        返回：
+            bool: 是否成功移除 LoRA 适配器
+        """
         return self.model_executor.remove_lora(lora_id)
 
     def list_loras(self) -> set[int]:
+        """
+        列出所有已加载的 LoRA 适配器
+        
+        返回：
+            set[int]: 已加载的 LoRA 适配器 ID 集合
+        """
         return self.model_executor.list_loras()
 
     def pin_lora(self, lora_id: int) -> bool:
+        """
+        固定 LoRA 适配器
+        
+        将指定的 LoRA 适配器固定在内存中，防止其被自动卸载。
+        这对于频繁使用的适配器很有用。
+        
+        参数：
+            lora_id (int): 要固定的 LoRA 适配器 ID
+            
+        返回：
+            bool: 是否成功固定 LoRA 适配器
+        """
         return self.model_executor.pin_lora(lora_id)
 
     def save_sharded_state(
@@ -405,6 +629,16 @@ class EngineCore:
         pattern: Optional[str] = None,
         max_size: Optional[int] = None,
     ) -> None:
+        """
+        保存分片模型状态
+        
+        将模型的状态字典保存为多个分片文件，用于大型模型的检查点保存。
+        
+        参数：
+            path (str): 保存路径
+            pattern (Optional[str]): 文件名模式，用于生成分片文件名
+            max_size (Optional[int]): 每个分片文件的最大大小（字节）
+        """
         self.model_executor.save_sharded_state(path=path,
                                                pattern=pattern,
                                                max_size=max_size)
@@ -414,6 +648,20 @@ class EngineCore:
                        timeout: Optional[float] = None,
                        args: tuple = (),
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
+        """
+        集体 RPC 调用
+        
+        在所有工作进程中执行相同的方法调用，用于分布式模型的同步操作。
+        
+        参数：
+            method (Union[str, Callable]): 要调用的方法名或方法对象
+            timeout (Optional[float]): 超时时间（秒）
+            args (tuple): 位置参数
+            kwargs (Optional[dict]): 关键字参数
+            
+        返回：
+            list[_R]: 所有工作进程返回结果的列表
+        """
         return self.model_executor.collective_rpc(method, timeout, args,
                                                   kwargs)
 
@@ -421,35 +669,56 @@ class EngineCore:
         self,
         tensorizer_config,
     ) -> None:
+        """
+        保存张量化模型
+        
+        使用 Tensorizer 库将模型保存为优化格式，以加速模型加载。
+        
+        参数：
+            tensorizer_config: Tensorizer 配置对象
+        """
         self.model_executor.save_tensorized_model(
             tensorizer_config=tensorizer_config, )
 
     def preprocess_add_request(
             self, request: EngineCoreRequest) -> tuple[Request, int]:
-        """Preprocess the request.
-        
-        This function could be directly used in input processing thread to allow
-        request initialization running in parallel with Model forward
         """
+        预处理请求
+        
+        这个函数可以直接在输入处理线程中使用，允许请求初始化与模型前向传播并行运行。
+        
+        这个方法执行以下操作：
+        1. 处理多模态输入的哈希和缓存
+        2. 将 EngineCoreRequest 转换为 Request 对象
+        3. 初始化结构化输出语法（如果需要）
+        
+        参数：
+            request (EngineCoreRequest): 原始的引擎核心请求
+            
+        返回：
+            tuple[Request, int]: 处理后的请求对象和请求波次
+        """
+        # 处理多模态输入的哈希和缓存
         if request.mm_hashes is not None:
             assert request.mm_kwargs is not None
 
-            # Note on thread safety: no race condition.
-            # `mm_input_cache_server` is reset at the end of LLMEngine init,
-            # and will only accessed in the input processing thread afterwards.
+            # 线程安全注意事项：没有竞态条件。
+            # `mm_input_cache_server` 在 LLMEngine 初始化结束时被重置，
+            # 之后只会在输入处理线程中访问。
             request.mm_kwargs = self.mm_input_cache_server.get_and_update(
                 request.mm_kwargs, request.mm_hashes)
 
+        # 将 EngineCoreRequest 转换为 Request 对象
         req = Request.from_engine_core_request(request,
                                                self.request_block_hasher)
+        # 如果需要结构化输出，初始化语法编译器
         if req.use_structured_output:
-            # Note on thread safety: no race condition.
-            # `grammar_init` is only invoked in input processing thread. For
-            # `structured_output_manager`, each request is independent and
-            # grammar compilation is async. Scheduler always checks grammar
-            # compilation status before scheduling request.
+            # 线程安全注意事项：没有竞态条件。
+            # `grammar_init` 只在输入处理线程中调用。对于
+            # `structured_output_manager`，每个请求都是独立的，语法编译是异步的。
+            # 调度器在调度请求之前总是检查语法编译状态。
             self.structured_output_manager.grammar_init(req)
-        return req, request.current_wave
+        return req, request.current_wave  # 返回处理后的请求和波次号
 
 
 class EngineCoreProc(EngineCore):

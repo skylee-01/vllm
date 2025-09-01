@@ -161,63 +161,89 @@ class Scheduler(SchedulerInterface):
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
     def schedule(self) -> SchedulerOutput:
-        # NOTE(woosuk) on the scheduling algorithm:
-        # There's no "decoding phase" nor "prefill phase" in the scheduler.
-        # Each request just has the num_computed_tokens and
-        # num_tokens_with_spec. num_tokens_with_spec =
-        # len(prompt_token_ids) + len(output_token_ids) + len(spec_token_ids).
-        # At each step, the scheduler tries to assign tokens to the requests
-        # so that each request's num_computed_tokens can catch up its
-        # num_tokens_with_spec. This is general enough to cover
-        # chunked prefills, prefix caching, speculative decoding,
-        # and the "jump decoding" optimization in the future.
+        """
+        调度请求以在模型上执行。这是调度器的核心方法，它决定了哪些请求在当前步中运行，
+        以及它们将处理多少个 token。
 
+        调度算法概述 (woosuk):
+        调度器中没有“解码阶段”或“预填充阶段”。每个请求都有 `num_computed_tokens`
+        和 `num_tokens_with_spec`。`num_tokens_with_spec` 等于
+        `len(prompt_token_ids) + len(output_token_ids) + len(spec_token_ids)`。
+        在每一步中，调度器尝试为请求分配 token，以便每个请求的 `num_computed_tokens`
+        可以追赶其 `num_tokens_with_spec`。这种方法足够通用，可以覆盖
+        分块预填充、前缀缓存、推测解码以及未来的“跳转解码”优化。
+
+        调度流程包括：
+        1. 调度正在运行的请求：尝试为当前正在运行的请求分配新的 KV 缓存块和 token。
+        2. 处理抢占：如果资源不足，根据调度策略抢占优先级最低的请求。
+        3. 调度等待中的请求：从等待队列中选择请求并将其移至运行队列，同时分配 KV 缓存块和 token。
+        4. 处理特殊情况：例如 KVTransfer、结构化输出以及 LoRA 约束。
+        5. 生成调度输出：包含所有已调度请求的详细信息，如新请求数据、缓存请求数据、
+           调度 token 数量、推测解码 token、编码器输入以及语法位掩码等。
+        6. 更新内部状态：在调度完成后更新请求的 `num_computed_tokens` 和其他内部状态。
+
+        Returns:
+            SchedulerOutput: 包含当前调度步骤的结果，包括已调度的新请求、
+                             已缓存的请求、调度 token 数量、推测解码 token、
+                             编码器输入、公共前缀块数量、已完成请求 ID、
+                             空闲编码器输入 ID、结构化输出请求 ID 和语法位掩码。
+        """
+        # 用于存储本轮调度中新调度的请求
         scheduled_new_reqs: list[Request] = []
+        # 用于存储本轮调度中从抢占状态恢复的请求
         scheduled_resumed_reqs: list[Request] = []
+        # 用于存储本轮调度中继续运行的请求
         scheduled_running_reqs: list[Request] = []
+        # 用于存储本轮调度中被抢占的请求
         preempted_reqs: list[Request] = []
 
-        # NOTE: structured_output_request_ids maps
-        # a request's (request that uses structured output)
-        # request_id to the running request index.
-        # This will helps us determine to slice the grammar bitmask
-        # and only applies valid mask for requests that
-        # uses structured decoding.
+        # NOTE: structured_output_request_ids 映射
+        # 使用结构化输出的请求的 request_id 到其在运行请求列表中的索引。
+        # 这有助于我们确定如何切片语法位掩码，并仅对使用结构化解码的请求应用有效的掩码。
         structured_output_request_ids: dict[str, int] = {}
 
+        # 记录每个请求新分配的 KV 缓存块 ID
         req_to_new_block_ids: dict[str, tuple[list[int], ...]] = {}
+        # 记录每个请求本轮调度中处理的 token 数量
         num_scheduled_tokens: dict[str, int] = {}
+        # 当前可用的 token 预算
         token_budget = self.max_num_scheduled_tokens
-        # Encoder-related.
+        # 编码器相关。
+        # 记录每个请求本轮调度中需要处理的编码器输入
         scheduled_encoder_inputs: dict[str, list[int]] = {}
+        # 当前可用的编码器 token 预算
         encoder_budget = self.max_num_encoder_input_tokens
-        # Spec decode-related.
+        # 推测解码相关。
+        # 记录每个请求本轮调度中推测解码的 token
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 
-        # For logging.
+        # 用于日志记录的调度时间戳
         scheduled_timestamp = time.monotonic()
 
-        # First, schedule the RUNNING requests.
+        # 首先，调度 RUNNING 状态的请求。
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
+            # 计算当前请求需要处理的新 token 数量
             num_new_tokens = (request.num_tokens_with_spec +
                               request.num_output_placeholders -
                               request.num_computed_tokens)
+            # 如果启用了长预填充 token 阈值，并且新 token 数量超过阈值，则限制新 token 数量
             if (0 < self.scheduler_config.long_prefill_token_threshold <
                     num_new_tokens):
                 num_new_tokens = (
                     self.scheduler_config.long_prefill_token_threshold)
+            # 限制新 token 数量不超过当前 token 预算
             num_new_tokens = min(num_new_tokens, token_budget)
 
-            # Make sure the input position does not exceed the max model len.
-            # This is necessary when using spec decoding.
+            # 确保输入位置不超过模型的最大长度。
+            # 在使用推测解码时这是必要的。
             num_new_tokens = min(
                 num_new_tokens,
                 self.max_model_len - 1 - request.num_computed_tokens)
 
-            # Schedule encoder inputs.
+            # 调度编码器输入。
             encoder_inputs_to_schedule = None
             new_encoder_budget = encoder_budget
             if request.has_encoder_inputs:
@@ -227,38 +253,38 @@ class Scheduler(SchedulerInterface):
                      encoder_budget)
 
             if num_new_tokens == 0:
-                # The request cannot be scheduled because one of the following
-                # reasons:
-                # 1. No new tokens to schedule. This may happen when
-                #    (1) PP>1 and we have already scheduled all prompt tokens
-                #    but they are not finished yet.
-                #    (2) Async scheduling and the request has reached to either
-                #    its max_total_tokens or max_model_len.
-                # 2. The encoder budget is exhausted.
-                # 3. The encoder cache is exhausted.
-                # NOTE(woosuk): Here, by doing `continue` instead of `break`,
-                # we do not strictly follow the FCFS scheduling policy and
-                # allow the lower-priority requests to be scheduled.
+                # 请求无法调度，原因可能如下：
+                # 1. 没有新的 token 可以调度。这可能发生在：
+                #    (1) PP>1，并且已经调度了所有 prompt token 但它们尚未完成。
+                #    (2) 异步调度，并且请求已达到其 max_total_tokens 或 max_model_len。
+                # 2. 编码器预算已用尽。
+                # 3. 编码器缓存已用尽。
+                # NOTE(woosuk): 在这里，通过执行 `continue` 而不是 `break`，
+                # 我们没有严格遵循 FCFS 调度策略，而是允许优先级较低的请求被调度。
                 req_index += 1
                 continue
 
+            # 尝试为请求分配 KV 缓存块
             while True:
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
                     num_lookahead_tokens=self.num_lookahead_tokens)
                 if new_blocks is None:
-                    # The request cannot be scheduled.
-                    # Preempt the lowest-priority request.
+                    # 请求无法调度。
+                    # 抢占优先级最低的请求。
                     if self.policy == SchedulingPolicy.PRIORITY:
+                        # 如果是优先级调度，抢占优先级最低（和抵达时间最晚）的请求
                         preempted_req = max(
                             self.running,
                             key=lambda r: (r.priority, r.arrival_time),
                         )
                         self.running.remove(preempted_req)
                     else:
+                        # 如果是 FCFS 调度，抢占最近加入的请求
                         preempted_req = self.running.pop()
 
+                    # 释放被抢占请求的 KV 缓存
                     self.kv_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
@@ -266,27 +292,28 @@ class Scheduler(SchedulerInterface):
                         preempted_req.record_event(
                             EngineCoreEventType.PREEMPTED, scheduled_timestamp)
 
+                    # 将被抢占的请求重新添加到等待队列的头部
                     self.waiting.prepend_request(preempted_req)
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
-                        # No more request to preempt.
+                        # 没有更多请求可以抢占。
                         can_schedule = False
                         break
                 else:
-                    # The request can be scheduled.
+                    # 请求可以被调度。
                     can_schedule = True
                     break
             if not can_schedule:
+                # 如果无法调度当前请求（因为没有更多请求可以抢占），则跳出循环
                 break
             assert new_blocks is not None
 
-            # Schedule the request.
+            # 调度请求。
             scheduled_running_reqs.append(request)
             if request.use_structured_output:
-                # PERF: in case of chunked prefill,
-                # request might not include any new tokens.
-                # Therefore, we might introduce some additional
-                # cycle to fill in the bitmask, which could be a big no-op.
+                # PERF: 在分块预填充的情况下，
+                # 请求可能不包含任何新的 token。
+                # 因此，我们可能会引入一些额外的循环来填充位掩码，这可能是一个大的空操作。
                 structured_output_request_ids[request.request_id] = req_index
             req_to_new_block_ids[request.request_id] = (
                 new_blocks.get_block_ids())
@@ -294,27 +321,28 @@ class Scheduler(SchedulerInterface):
             token_budget -= num_new_tokens
             req_index += 1
 
-            # Speculative decode related.
+            # 推测解码相关。
             if request.spec_token_ids:
+                # 计算实际调度的推测 token 数量
                 num_scheduled_spec_tokens = (num_new_tokens +
                                              request.num_computed_tokens -
                                              request.num_tokens)
                 if num_scheduled_spec_tokens > 0:
-                    # Trim spec_token_ids list to num_scheduled_spec_tokens.
+                    # 将 spec_token_ids 列表截断为 num_scheduled_spec_tokens。
                     del request.spec_token_ids[num_scheduled_spec_tokens:]
                     scheduled_spec_decode_tokens[request.request_id] = (
                         request.spec_token_ids)
 
-            # Encoder-related.
+            # 编码器相关。
             if encoder_inputs_to_schedule:
                 scheduled_encoder_inputs[request.request_id] = (
                     encoder_inputs_to_schedule)
-                # Allocate the encoder cache.
+                # 分配编码器缓存。
                 for i in encoder_inputs_to_schedule:
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_budget = new_encoder_budget
 
-        # Record the LoRAs in scheduled_running_reqs
+        # 记录 scheduled_running_reqs 中的 LoRA
         scheduled_loras: set[int] = set()
         if self.lora_config:
             scheduled_loras = set(
@@ -322,19 +350,19 @@ class Scheduler(SchedulerInterface):
                 if req.lora_request and req.lora_request.lora_int_id > 0)
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
-        # Use a temporary RequestQueue to collect requests that need to be
-        # skipped and put back at the head of the waiting queue later
+        # 使用一个临时 RequestQueue 来收集需要跳过并稍后放回等待队列头部的请求
         skipped_waiting_requests = create_request_queue(self.policy)
 
-        # Next, schedule the WAITING requests.
-        if not preempted_reqs:
+        # 接下来，调度 WAITING 状态的请求。
+        if not preempted_reqs:  # 只有在没有抢占发生时才调度等待队列
             while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
+                    # 运行中的请求数量已达上限，停止调度等待队列
                     break
 
                 request = self.waiting.peek_request()
 
-                # KVTransfer: skip request if still waiting for remote kvs.
+                # KVTransfer: 如果请求仍在等待远程 KV，则跳过。
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                     is_ready = self._update_waiting_for_remote_kv(request)
                     if is_ready:
@@ -347,8 +375,7 @@ class Scheduler(SchedulerInterface):
                         skipped_waiting_requests.prepend_request(request)
                         continue
 
-                # Skip request if the structured output request is still waiting
-                # for FSM compilation.
+                # 如果结构化输出请求仍在等待 FSM 编译，则跳过请求。
                 if request.status == RequestStatus.WAITING_FOR_FSM:
                     structured_output_req = request.structured_output_request
                     if structured_output_req and structured_output_req.grammar:
@@ -358,12 +385,11 @@ class Scheduler(SchedulerInterface):
                         skipped_waiting_requests.prepend_request(request)
                         continue
 
-                # Check that adding the request still respects the max_loras
-                # constraint.
+                # 检查添加请求是否仍然遵守 max_loras 限制。
                 if (self.lora_config and request.lora_request and
                     (len(scheduled_loras) == self.lora_config.max_loras and
-                     request.lora_request.lora_int_id not in scheduled_loras)):
-                    # Scheduling would exceed max_loras, skip.
+                     request.lora_request.lor-int_id not in scheduled_loras)):
+                    # 调度将超出 max_loras，跳过。
                     self.waiting.pop_request()
                     skipped_waiting_requests.prepend_request(request)
                     continue
@@ -371,24 +397,23 @@ class Scheduler(SchedulerInterface):
                 num_external_computed_tokens = 0
                 load_kv_async = False
 
-                # Get already-cached tokens.
+                # 获取已缓存的 token。
                 if request.num_computed_tokens == 0:
-                    # Get locally-cached tokens.
+                    # 获取本地缓存的 token。
                     new_computed_blocks, num_new_local_computed_tokens = \
                         self.kv_cache_manager.get_computed_blocks(
                             request)
 
-                    # Get externally-cached tokens if using a KVConnector.
+                    # 如果使用 KVConnector，则获取外部缓存的 token。
                     if self.connector is not None:
                         num_external_computed_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
                                 request, num_new_local_computed_tokens))
 
-                    # Total computed tokens (local + external).
+                    # 总计算 token 数量（本地 + 外部）。
                     num_computed_tokens = (num_new_local_computed_tokens +
                                            num_external_computed_tokens)
-                # KVTransfer: WAITING reqs have num_computed_tokens > 0
-                # after async KV recvs are completed.
+                # KVTransfer: WAITING 请求在异步 KV 接收完成后具有 num_computed_tokens > 0。
                 else:
                     new_computed_blocks = (
                         self.kv_cache_manager.create_empty_block_list())
@@ -398,23 +423,23 @@ class Scheduler(SchedulerInterface):
                 encoder_inputs_to_schedule = None
                 new_encoder_budget = encoder_budget
 
-                # KVTransfer: loading remote KV, do not allocate for new work.
+                # KVTransfer: 正在加载远程 KV，不为新工作分配。
                 if load_kv_async:
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
-                # Number of tokens to be scheduled.
+                # 需要调度的 token 数量。
                 else:
-                    # We use `request.num_tokens` instead of
-                    # `request.num_prompt_tokens` to consider the resumed
-                    # requests, which have output tokens.
+                    # 我们使用 `request.num_tokens` 而不是
+                    # `request.num_prompt_tokens` 来考虑已恢复的请求，
+                    # 这些请求具有输出 token。
                     num_new_tokens = request.num_tokens - num_computed_tokens
                     if (0 < self.scheduler_config.long_prefill_token_threshold
                             < num_new_tokens):
                         num_new_tokens = (
                             self.scheduler_config.long_prefill_token_threshold)
 
-                    # chunked prefill has to be enabled explicitly to allow
-                    # pooling requests to be chunked
+                    # 必须显式启用分块预填充才能允许
+                    # 对池化请求进行分块
                     if not self.scheduler_config.chunked_prefill_enabled and \
                         num_new_tokens > token_budget:
                         self.waiting.pop_request()
@@ -424,7 +449,7 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = min(num_new_tokens, token_budget)
                     assert num_new_tokens > 0
 
-                    # Schedule encoder inputs.
+                    # 调度编码器输入。
                     if request.has_encoder_inputs:
                         (encoder_inputs_to_schedule, num_new_tokens,
                          new_encoder_budget
@@ -432,18 +457,16 @@ class Scheduler(SchedulerInterface):
                              request, num_computed_tokens, num_new_tokens,
                              encoder_budget)
                         if num_new_tokens == 0:
-                            # The request cannot be scheduled.
+                            # 请求无法调度。
                             break
 
-                # Handles an edge case when P/D Disaggregation
-                # is used with Spec Decoding where an
-                # extra block gets allocated which
-                # creates a mismatch between the number
-                # of local and remote blocks.
+                # 处理 P/D 分离与推测解码一起使用时，
+                # 额外分配一个块导致本地块和远程块数量不匹配的边缘情况。
                 effective_lookahead_tokens = (0 if request.num_computed_tokens
                                               == 0 else
                                               self.num_lookahead_tokens)
 
+                # 分配 KV 缓存块
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens + num_external_computed_tokens,
@@ -454,13 +477,12 @@ class Scheduler(SchedulerInterface):
                 )
 
                 if new_blocks is None:
-                    # The request cannot be scheduled.
+                    # 请求无法调度。
                     break
 
-                # KVTransfer: the connector uses this info to determine
-                # if a load is needed. Note that
-                # This information is used to determine if a load is
-                # needed for this request.
+                # KVTransfer: 连接器使用此信息来确定
+                # 是否需要加载。请注意，
+                # 此信息用于确定此请求是否需要加载。
                 if self.connector is not None:
                     self.connector.update_state_after_alloc(
                         request,
@@ -468,12 +490,12 @@ class Scheduler(SchedulerInterface):
                         num_external_computed_tokens,
                     )
 
-                # Request was already popped from self.waiting
-                # unless it was re-added above due to new_blocks being None.
+                # 请求已从 self.waiting 中弹出，
+                # 除非由于 new_blocks 为 None 而在上面重新添加。
                 request = self.waiting.pop_request()
                 if load_kv_async:
-                    # If loading async, allocate memory and put request
-                    # into the WAITING_FOR_REMOTE_KV state.
+                    # 如果异步加载，分配内存并将请求
+                    # 置于 WAITING_FOR_REMOTE_KV 状态。
                     skipped_waiting_requests.prepend_request(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
@@ -486,6 +508,7 @@ class Scheduler(SchedulerInterface):
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED,
                                          scheduled_timestamp)
+                # 根据请求状态，添加到不同的调度请求列表中
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
@@ -494,43 +517,44 @@ class Scheduler(SchedulerInterface):
                     raise RuntimeError(
                         f"Invalid request status: {request.status}")
 
+                # 如果有 LoRA 配置，将请求的 LoRA ID 添加到已调度 LoRA 集合中
                 if self.lora_config and request.lora_request:
-                    scheduled_loras.add(request.lora_request.lora_int_id)
+                    scheduled_loras.add(request.lora_request.lor-int_id)
+                # 记录请求的新块 ID 和调度 token 数量
                 req_to_new_block_ids[request.request_id] = (
                     self.kv_cache_manager.get_block_ids(request.request_id))
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                # Count the number of prefix cached tokens.
+                # 计算前缀缓存的 token 数量。
                 if request.num_cached_tokens < 0:
                     request.num_cached_tokens = num_computed_tokens
-                # Encoder-related.
+                # 编码器相关。
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request.request_id] = (
                         encoder_inputs_to_schedule)
-                    # Allocate the encoder cache.
+                    # 分配编码器缓存。
                     for i in encoder_inputs_to_schedule:
                         self.encoder_cache_manager.allocate(request, i)
                     encoder_budget = new_encoder_budget
 
-        # Put back any skipped requests at the head of the waiting queue
+        # 将所有跳过的请求放回等待队列的头部
         if skipped_waiting_requests:
             self.waiting.prepend_requests(skipped_waiting_requests)
 
-        # Check if the scheduling constraints are satisfied.
+        # 检查调度约束是否满足。
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
-        # Since some requests in the RUNNING queue may not be scheduled in
-        # this step, the total number of scheduled requests can be smaller than
-        # len(self.running).
+        # 由于 RUNNING 队列中的某些请求可能在本步中未被调度，
+        # 因此已调度请求的总数可能小于 len(self.running)。
         assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
                 len(scheduled_running_reqs) <= len(self.running))
 
-        # Get the longest common prefix among all requests in the running queue.
-        # This can be potentially used for cascade attention.
+        # 获取运行队列中所有请求的最长公共前缀。
+        # 这可能用于级联注意力。
         num_common_prefix_blocks = [0] * len(
             self.kv_cache_config.kv_cache_groups)
         if self.running:
@@ -539,12 +563,13 @@ class Scheduler(SchedulerInterface):
                 self.kv_cache_manager.get_num_common_prefix_blocks(
                     any_request, len(self.running)))
 
+        # 为结构化输出生成语法位掩码
         grammar_bitmask = self.structured_output_manager.grammar_bitmask(
             self.requests,
             structured_output_request_ids,
             scheduled_spec_decode_tokens,
         )
-        # Construct the scheduler output.
+        # 构建调度器输出。
         new_reqs_data = [
             NewRequestData.from_request(req,
                                         req_to_new_block_ids[req.request_id])
@@ -565,29 +590,30 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             num_common_prefix_blocks=num_common_prefix_blocks,
-            # finished_req_ids is an existing state in the scheduler,
-            # instead of being newly scheduled in this step.
-            # It contains the request IDs that are finished in between
-            # the previous and the current steps.
+            # finished_req_ids 是调度器中的现有状态，
+            # 而不是在此步骤中新调度的。
+            # 它包含在前一步和当前步之间完成的请求 ID。
             finished_req_ids=self.finished_req_ids,
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
         )
 
-        # NOTE(Kuntai): this function is designed for multiple purposes:
-        # 1. Plan the KV cache store
-        # 2. Wrap up all the KV cache load / save ops into an opaque object
-        # 3. Clear the internal states of the connector
+        # NOTE(Kuntai): 此函数设计用于多种目的：
+        # 1. 规划 KV 缓存存储
+        # 2. 将所有 KV 缓存加载/保存操作包装成一个不透明对象
+        # 3. 清除连接器的内部状态
         if self.connector is not None:
             meta = self.connector.build_connector_meta(scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
+        # 获取并发布 KV 缓存事件
         events = self.kv_cache_manager.take_events()
         if events:
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
 
+        # 调度后更新调度器内部状态
         self._update_after_schedule(scheduler_output)
         return scheduler_output
 
